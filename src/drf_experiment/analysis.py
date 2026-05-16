@@ -24,65 +24,6 @@ def _extract_epoch_time(manifest: dict[str, Any]) -> float:
     return sum(values) / max(len(values), 1)
 
 
-def _extract_stability_summary(manifest: dict[str, Any]) -> dict[str, float]:
-    history = manifest.get("history", [])
-    if not history:
-        return {
-            "grad_total_pre_clip_mean": 0.0,
-            "grad_total_pre_clip_std": 0.0,
-            "grad_total_post_clip_mean": 0.0,
-            "grad_total_post_clip_std": 0.0,
-            "grad_clip_fraction_mean": 0.0,
-            "grad_dynamics_pre_clip_mean": 0.0,
-            "grad_gate_pre_clip_mean": 0.0,
-            "grad_core_pre_clip_mean": 0.0,
-            "grad_nan_count_total": 0.0,
-            "grad_inf_count_total": 0.0,
-            "val_accuracy_oscillation": 0.0,
-            "spike_rate_oscillation": 0.0,
-        }
-
-    def series(key: str, scope: str = "train") -> list[float]:
-        values = [epoch.get(scope, {}).get(key) for epoch in history]
-        return [float(value) for value in values if isinstance(value, (int, float))]
-
-    def mean_std(values: list[float]) -> tuple[float, float]:
-        if not values:
-            return 0.0, 0.0
-        mean = sum(values) / len(values)
-        variance = sum((value - mean) ** 2 for value in values) / len(values)
-        return mean, variance ** 0.5
-
-    def oscillation(values: list[float]) -> float:
-        if len(values) < 2:
-            return 0.0
-        deltas = [abs(curr - prev) for prev, curr in zip(values[:-1], values[1:])]
-        return sum(deltas) / len(deltas)
-
-    pre_mean, pre_std = mean_std(series("grad_total_pre_clip_mean"))
-    post_mean, post_std = mean_std(series("grad_total_post_clip_mean"))
-    clip_mean, _ = mean_std(series("grad_clip_fraction"))
-    dyn_mean, _ = mean_std(series("grad_preclip_group_dynamics_mean"))
-    gate_mean, _ = mean_std(series("grad_preclip_group_gate_mean"))
-    core_mean, _ = mean_std(series("grad_preclip_group_core_mean"))
-    nan_total = sum(series("grad_nan_count_total"))
-    inf_total = sum(series("grad_inf_count_total"))
-    return {
-        "grad_total_pre_clip_mean": pre_mean,
-        "grad_total_pre_clip_std": pre_std,
-        "grad_total_post_clip_mean": post_mean,
-        "grad_total_post_clip_std": post_std,
-        "grad_clip_fraction_mean": clip_mean,
-        "grad_dynamics_pre_clip_mean": dyn_mean,
-        "grad_gate_pre_clip_mean": gate_mean,
-        "grad_core_pre_clip_mean": core_mean,
-        "grad_nan_count_total": nan_total,
-        "grad_inf_count_total": inf_total,
-        "val_accuracy_oscillation": oscillation(series("accuracy", scope="val")),
-        "spike_rate_oscillation": oscillation(series("spike_rate")),
-    }
-
-
 def _load_suite_summary_manifests(path: Path) -> list[dict[str, Any]]:
     summary = load_json(path)
     results = summary.get("results", {})
@@ -100,7 +41,7 @@ def _flatten_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     best = manifest.get("best_test", {})
     cfg = manifest.get("config", {})
     dataset_cfg = cfg.get("dataset", {})
-    row = {
+    return {
         "variant": cfg.get("name", "unknown"),
         "family": _family_name(cfg.get("name", "unknown")),
         "dataset": dataset_cfg.get("name", "unknown"),
@@ -118,8 +59,6 @@ def _flatten_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "rho_mean": best.get("rho_mean", 0.0),
         "omega_mean": best.get("omega_mean", 0.0),
     }
-    row.update(_extract_stability_summary(manifest))
-    return row
 
 
 def discover_manifests(root: str | Path) -> list[dict[str, Any]]:
@@ -276,53 +215,6 @@ def plot_suite_dashboard(root: str | Path, output_dir: str | Path, baseline_vari
     plt.close()
     created.append(str(path))
 
-    stability = df.sort_values("grad_total_pre_clip_std", ascending=True)
-    plt.figure(figsize=(12, max(6, len(stability) * 0.35)))
-    sns.barplot(data=stability, x="grad_total_pre_clip_std", y="variant", hue="family", dodge=False)
-    plt.title("Gradient Stability Leaderboard")
-    plt.tight_layout()
-    path = output_dir / "leaderboard_gradient_stability.png"
-    plt.savefig(path, dpi=220)
-    plt.close()
-    created.append(str(path))
-
-    plt.figure(figsize=(10, 8))
-    sns.scatterplot(
-        data=df,
-        x="grad_total_pre_clip_std",
-        y="accuracy",
-        hue="family",
-        size="grad_clip_fraction_mean",
-        sizes=(80, 400),
-    )
-    for _, row in df.iterrows():
-        plt.text(row["grad_total_pre_clip_std"], row["accuracy"], row["variant"], fontsize=8)
-    plt.title("Accuracy vs Gradient Stability")
-    plt.tight_layout()
-    path = output_dir / "accuracy_vs_gradient_stability.png"
-    plt.savefig(path, dpi=220)
-    plt.close()
-    created.append(str(path))
-
-    stability_heatmap = df.set_index("variant")[
-        [
-            "grad_total_pre_clip_std",
-            "grad_clip_fraction_mean",
-            "grad_dynamics_pre_clip_mean",
-            "grad_gate_pre_clip_mean",
-            "val_accuracy_oscillation",
-            "spike_rate_oscillation",
-        ]
-    ]
-    plt.figure(figsize=(10, max(5, len(stability_heatmap) * 0.35)))
-    sns.heatmap(stability_heatmap, cmap="crest", annot=True, fmt=".3f")
-    plt.title("Training Stability Summary")
-    plt.tight_layout()
-    path = output_dir / "stability_heatmap.png"
-    plt.savefig(path, dpi=220)
-    plt.close()
-    created.append(str(path))
-
     return created
 
 
@@ -346,16 +238,13 @@ def plot_training_curves(root: str | Path, output_dir: str | Path, variants: lis
                     "val_loss": epoch_entry["val"].get("loss", 0.0),
                     "spike_rate": epoch_entry["train"].get("spike_rate", 0.0),
                     "energy_mj": epoch_entry["train"].get("energy_mj", 0.0),
-                    "grad_total_pre_clip_mean": epoch_entry["train"].get("grad_total_pre_clip_mean", 0.0),
-                    "grad_total_post_clip_mean": epoch_entry["train"].get("grad_total_post_clip_mean", 0.0),
-                    "grad_clip_fraction": epoch_entry["train"].get("grad_clip_fraction", 0.0),
                 }
             )
     if not frames:
         raise FileNotFoundError("No history records found for training curves.")
     df = pd.DataFrame(frames)
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 14))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     sns.lineplot(data=df, x="epoch", y="train_accuracy", hue="variant", ax=axes[0, 0])
     axes[0, 0].set_title("Train Accuracy")
     sns.lineplot(data=df, x="epoch", y="val_accuracy", hue="variant", ax=axes[0, 1])
@@ -364,10 +253,6 @@ def plot_training_curves(root: str | Path, output_dir: str | Path, variants: lis
     axes[1, 0].set_title("Spike Rate")
     sns.lineplot(data=df, x="epoch", y="energy_mj", hue="variant", ax=axes[1, 1])
     axes[1, 1].set_title("Energy Proxy")
-    sns.lineplot(data=df, x="epoch", y="grad_total_pre_clip_mean", hue="variant", ax=axes[2, 0])
-    axes[2, 0].set_title("Pre-Clip Gradient Norm")
-    sns.lineplot(data=df, x="epoch", y="grad_clip_fraction", hue="variant", ax=axes[2, 1])
-    axes[2, 1].set_title("Gradient Clip Fraction")
     for ax in axes.flat:
         ax.legend(loc="best", fontsize=8)
     plt.tight_layout()
@@ -397,15 +282,13 @@ def plot_run_diagnostics(run_dir: str | Path, output_dir: str | Path | None = No
                 "energy_mj": item["train"].get("energy_mj", 0.0),
                 "branch_entropy": item["val"].get("branch_utilization_entropy", 0.0),
                 "membrane_amplitude_mean": item["val"].get("membrane_amplitude_mean", 0.0),
-                "grad_total_pre_clip_mean": item["train"].get("grad_total_pre_clip_mean", 0.0),
-                "grad_clip_fraction": item["train"].get("grad_clip_fraction", 0.0),
             }
             for item in history
         ]
     )
 
     created: list[str] = []
-    fig, axes = plt.subplots(3, 2, figsize=(14, 14))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     sns.lineplot(data=df, x="epoch", y="train_accuracy", ax=axes[0, 0], label="train")
     sns.lineplot(data=df, x="epoch", y="val_accuracy", ax=axes[0, 0], label="val")
     axes[0, 0].set_title("Accuracy")
@@ -418,10 +301,6 @@ def plot_run_diagnostics(run_dir: str | Path, output_dir: str | Path | None = No
     sns.lineplot(data=df, x="epoch", y="branch_entropy", ax=axes[1, 1], label="branch_entropy")
     sns.lineplot(data=df, x="epoch", y="membrane_amplitude_mean", ax=axes[1, 1], label="membrane_amplitude")
     axes[1, 1].set_title("Dynamics")
-    sns.lineplot(data=df, x="epoch", y="grad_total_pre_clip_mean", ax=axes[2, 0], label="grad_pre_clip")
-    axes[2, 0].set_title("Gradient Norm")
-    sns.lineplot(data=df, x="epoch", y="grad_clip_fraction", ax=axes[2, 1], label="clip_fraction")
-    axes[2, 1].set_title("Clip Fraction")
     plt.tight_layout()
     path = output_dir / "run_diagnostics.png"
     plt.savefig(path, dpi=220)

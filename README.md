@@ -257,6 +257,40 @@ runs/
     ...
 ```
 
+### Real-data shortlist suite
+
+This suite keeps only the small family that looked most useful for real-world follow-up runs:
+
+- `baseline_drf`
+- `gate_D1`
+- `gate_freq_C4_SRG`
+- `gate_TopK1_SRG`
+- `gate_TopK2_SRG`
+
+Example command for CIFAR-10:
+
+```bash
+PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
+  --suite real_data_shortlist \
+  --dataset scifar10 \
+  --epochs 30 \
+  --batch-size 64 \
+  --save-dir ./runs \
+  --seed 42
+```
+
+To run the same small family across all registered datasets:
+
+```bash
+PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
+  --suite real_data_shortlist \
+  --all-datasets \
+  --epochs 30 \
+  --batch-size 64 \
+  --save-dir ./runs \
+  --seed 42
+```
+
 ### Full suite, end-to-end
 
 This runs the full, current experiment matrix in sequence for one dataset:

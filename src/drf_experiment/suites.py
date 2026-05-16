@@ -213,5 +213,12 @@ SUITES = {
         "ion_ControlBranchNoise",
         "ion_ControlSomaNoise",
     ],
+    "real_data_shortlist": [
+        "baseline_drf",
+        "gate_D1",
+        "gate_freq_C4_SRG",
+        "gate_TopK1_SRG",
+        "gate_TopK2_SRG",
+    ],
     "full_plan": list(VARIANT_UPDATES.keys()),
 }

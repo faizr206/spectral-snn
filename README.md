@@ -200,6 +200,7 @@ The code organizes the plan into suites:
 - `phase3`
 - `phase4`
 - `spectral_gating_plan`
+- `spectral_gating_jax_clean`
 - `full_plan`
 
 `full_plan` is the broad experiment matrix. `spectral_gating_plan` is the gating-only matrix from [something/drf_spectral_gating_experiment_plan.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_spectral_gating_experiment_plan.md:1), covering:
@@ -215,6 +216,8 @@ The code organizes the plan into suites:
 - top-k spectral resonance routing
 - frequency-initialization plus spectral routing
 - stochastic ion-channel-inspired gating variants and controls from [something/drf_stochastic_ion_channel_variants.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_stochastic_ion_channel_variants.md:1)
+
+`spectral_gating_jax_clean` is the S5-RF/JAX-friendly subset of `spectral_gating_plan`. It keeps the deterministic spectral routing variants and excludes the stochastic `ion_*` variants.
 
 ### Spectral gating suite, one dataset
 
@@ -257,39 +260,55 @@ runs/
     ...
 ```
 
-### Real-data shortlist suite
+### Clean JAX SSM spectral gating suite
 
-This suite keeps only the small family that looked most useful for real-world follow-up runs:
-
-- `baseline_drf`
-- `gate_D1`
-- `gate_freq_C4_SRG`
-- `gate_TopK1_SRG`
-- `gate_TopK2_SRG`
-
-Example command for CIFAR-10:
+This runs the deterministic spectral gating subset through the JAX/Equinox S5-RF SSM backend on the real-data datasets:
 
 ```bash
 PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
-  --suite real_data_shortlist \
-  --dataset scifar10 \
-  --epochs 30 \
-  --batch-size 64 \
-  --save-dir ./runs \
-  --seed 42
-```
-
-To run the same small family across all registered datasets:
-
-```bash
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
-  --suite real_data_shortlist \
+  --suite spectral_gating_jax_clean \
   --all-datasets \
+  --datasets smnist,psmnist,scifar10,shd \
+  --implementation jax-ssm \
+  --epochs 10 \
+  --batch-size 64 \
+  --save-dir ./runs \
+  --seed 42
+```
+
+### Full suite on real datasets
+
+Use the original `full_plan` suite for real-data comparisons, then choose the implementation backend explicitly.
+
+The default implementation is the original PyTorch D-RF:
+
+```bash
+PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
+  --suite full_plan \
+  --all-datasets \
+  --datasets smnist,psmnist,scifar10,shd \
+  --implementation pytorch \
   --epochs 30 \
   --batch-size 64 \
   --save-dir ./runs \
   --seed 42
 ```
+
+To run the same variant names through the JAX/Equinox S5-RF SSM backend from `s5rf_code_reference/s5-rf`, use `--implementation jax-ssm`:
+
+```bash
+PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
+  --suite full_plan \
+  --all-datasets \
+  --datasets smnist,psmnist,scifar10,shd \
+  --implementation jax-ssm \
+  --epochs 30 \
+  --batch-size 64 \
+  --save-dir ./runs \
+  --seed 42
+```
+
+The S5-RF backend requires the JAX stack from `s5rf_code_reference/s5-rf/requirements.txt`, especially `jax`, `jaxlib`, `equinox`, and `optax`. For this backend, dataloader workers are forced to `0` internally to avoid forking after JAX has initialized its runtime threads.
 
 ### Full suite, end-to-end
 

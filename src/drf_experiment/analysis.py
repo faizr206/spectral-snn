@@ -24,6 +24,14 @@ def _extract_epoch_time(manifest: dict[str, Any]) -> float:
     return sum(values) / max(len(values), 1)
 
 
+def _format_parameter_count(value: float) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return f"{value:.0f}"
+
+
 def _load_suite_summary_manifests(path: Path) -> list[dict[str, Any]]:
     summary = load_json(path)
     results = summary.get("results", {})
@@ -159,7 +167,8 @@ def plot_suite_dashboard(root: str | Path, output_dir: str | Path, baseline_vari
         sizes=(80, 400),
     )
     for _, row in df.iterrows():
-        plt.text(row["energy_mj"], row["accuracy"], row["variant"], fontsize=8)
+        label = f"{row['variant']}\n{_format_parameter_count(row['parameter_count'])}"
+        plt.text(row["energy_mj"], row["accuracy"], label, fontsize=8)
     plt.title("Accuracy vs Energy")
     plt.tight_layout()
     path = output_dir / "pareto_accuracy_energy.png"
@@ -185,6 +194,19 @@ def plot_suite_dashboard(root: str | Path, output_dir: str | Path, baseline_vari
     plt.close()
     created.append(str(path))
 
+    params = df.sort_values("parameter_count", ascending=False)
+    plt.figure(figsize=(12, max(6, len(params) * 0.35)))
+    sns.barplot(data=params, x="parameter_count", y="variant", hue="family", dodge=False)
+    for index, row in params.reset_index(drop=True).iterrows():
+        plt.text(row["parameter_count"], index, _format_parameter_count(row["parameter_count"]), va="center", fontsize=8)
+    plt.title("Variant Parameter Count")
+    plt.xlabel("Parameters")
+    plt.tight_layout()
+    path = output_dir / "parameter_count.png"
+    plt.savefig(path, dpi=220)
+    plt.close()
+    created.append(str(path))
+
     heatmap_df = df.set_index("variant")[["delta_accuracy", "rel_spike_change", "rel_energy_change", "rel_time_change"]]
     plt.figure(figsize=(10, max(5, len(heatmap_df) * 0.35)))
     sns.heatmap(heatmap_df, cmap="coolwarm", center=0.0, annot=True, fmt=".3f")
@@ -205,7 +227,7 @@ def plot_suite_dashboard(root: str | Path, output_dir: str | Path, baseline_vari
     created.append(str(path))
 
     plt.figure(figsize=(10, 6))
-    family_mean = df.groupby("family", as_index=False)[["accuracy", "energy_mj", "spike_rate"]].mean()
+    family_mean = df.groupby("family", as_index=False)[["accuracy", "energy_mj", "spike_rate", "parameter_count"]].mean()
     family_long = family_mean.melt(id_vars="family", var_name="metric", value_name="value")
     sns.barplot(data=family_long, x="family", y="value", hue="metric")
     plt.title("Improvement Family Summary")

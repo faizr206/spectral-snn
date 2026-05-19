@@ -140,6 +140,18 @@ def _build_mnist(cfg: DatasetConfig, train: bool, permuted: bool) -> Dataset:
     return PermutedDataset()
 
 
+def _build_smnist(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
+    train_ds, val_ds = _split_dataset(_build_mnist(cfg, True, False), cfg.val_size)
+    test_ds = _build_mnist(cfg, False, False)
+    return train_ds, val_ds, test_ds
+
+
+def _build_psmnist(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
+    train_ds, val_ds = _split_dataset(_build_mnist(cfg, True, True), cfg.val_size)
+    test_ds = _build_mnist(cfg, False, True)
+    return train_ds, val_ds, test_ds
+
+
 def _build_seq_cifar10(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
     transform = transforms.Compose(
         [
@@ -205,8 +217,8 @@ BUILDERS: dict[str, Callable[[DatasetConfig], tuple[Dataset, Dataset, Dataset]]]
     "delayed_xor": _build_delayed_xor,
     "adding": _build_adding,
     "burst_suppression": _build_burst_suppression,
-    "smnist": lambda cfg: (_split_dataset(_build_mnist(cfg, True, False), cfg.val_size) + (_build_mnist(cfg, False, False),)),  # type: ignore[operator]
-    "psmnist": lambda cfg: (_split_dataset(_build_mnist(cfg, True, True), cfg.val_size) + (_build_mnist(cfg, False, True),)),  # type: ignore[operator]
+    "smnist": _build_smnist,
+    "psmnist": _build_psmnist,
     "scifar10": _build_seq_cifar10,
     "shd": _build_shd,
     "lra_listops": _build_tensor_folder,

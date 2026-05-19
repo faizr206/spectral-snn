@@ -1,8 +1,12 @@
 code_reference/
+s5rf_code_reference/
 data/
 runs/
 runs*/
 tmp*/
+
+.codex/
+.agents/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

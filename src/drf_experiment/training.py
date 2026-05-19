@@ -216,6 +216,40 @@ def _write_suite_plots(suite_dir: Path) -> None:
         )
 
 
+def _extract_report_epoch_time(manifest: dict[str, Any]) -> float:
+    history = manifest.get("history", [])
+    if not history:
+        return 0.0
+    values = [epoch.get("train", {}).get("epoch_time_sec", 0.0) for epoch in history]
+    return sum(values) / max(len(values), 1)
+
+
+def _suite_result_report(results: dict[str, Any], variant_order: list[str]) -> list[dict[str, Any]]:
+    report = []
+    for variant in variant_order:
+        manifest = results.get(variant)
+        if not isinstance(manifest, dict):
+            continue
+        cfg = manifest.get("config", {})
+        best = manifest.get("best_test", {})
+        report.append(
+            {
+                "variant": variant,
+                "dataset": cfg.get("dataset", {}).get("name", "unknown"),
+                "backend": manifest.get("backend", cfg.get("model", {}).get("backend", "unknown")),
+                "run_dir": manifest.get("run_dir", ""),
+                "accuracy": best.get("accuracy", 0.0),
+                "loss": best.get("loss", 0.0),
+                "spike_rate": best.get("spike_rate", 0.0),
+                "energy_mj": best.get("energy_mj", 0.0),
+                "energy_proxy_mj": best.get("energy_proxy_mj", best.get("energy_mj", 0.0)),
+                "parameter_count": manifest.get("parameter_count", 0),
+                "train_epoch_time_sec": _extract_report_epoch_time(manifest),
+            }
+        )
+    return report
+
+
 def _shutdown_dataloader_workers(*loaders) -> None:
     for loader in loaders:
         iterator = getattr(loader, "_iterator", None)
@@ -236,6 +270,13 @@ def run_experiment(
     run_dir: str | Path | None = None,
     resume: bool = False,
 ) -> dict[str, Any]:
+    if cfg.model.backend == "jax_s5rf":
+        from .s5rf_jax import run_s5rf_experiment
+
+        return run_s5rf_experiment(cfg, run_dir=run_dir, resume=resume)
+    if cfg.model.backend != "torch_drf":
+        raise ValueError(f"Unsupported model backend: {cfg.model.backend}")
+
     set_seed(cfg.training.seed)
     device = resolve_device(cfg.training.device)
     _configure_runtime(device)
@@ -421,6 +462,7 @@ def run_suite(
     device: str | None = None,
     amp: bool = False,
     compile_model: bool = False,
+    model_backend: str | None = None,
     resume_suite: str | Path | None = None,
     parallelism: int = 1,
     devices: list[str] | None = None,
@@ -448,6 +490,7 @@ def run_suite(
             device=device,
             amp=amp,
             compile_model=compile_model,
+            model_backend=model_backend,
             parallelism=parallelism,
             devices=devices,
         )
@@ -470,6 +513,7 @@ def run_suite(
                 device=device,
                 amp=amp,
                 compile_model=compile_model,
+                model_backend=model_backend,
                 suite_dir=suite_dir,
                 variant_state=variant_state,
             )
@@ -483,6 +527,7 @@ def run_suite(
         "dataset_name": dataset_name,
         "suite_dir": str(suite_dir),
         "variants": list(SUITES[suite_name]),
+        "report": _suite_result_report(results, list(SUITES[suite_name])),
         "results": results,
         "parallelism": parallelism,
         "completed": True,
@@ -504,6 +549,7 @@ def _variant_run_payload(
     device: str | None,
     amp: bool,
     compile_model: bool,
+    model_backend: str | None,
     suite_dir: Path,
     variant_state: dict[str, Any],
 ) -> tuple[ExperimentConfig, Path, bool]:
@@ -530,6 +576,8 @@ def _variant_run_payload(
         cfg.training.amp = True
     if compile_model:
         cfg.training.compile_model = True
+    if model_backend is not None:
+        cfg.model.backend = model_backend
     run_path = run_path if run_path is not None else suite_dir / f"{cfg.name}-{now_timestamp()}"
     cfg.training.save_dir = str(suite_dir)
     return cfg, run_path, run_path.joinpath("last.ckpt").exists()
@@ -554,6 +602,7 @@ def _run_suite_parallel(
     device: str | None,
     amp: bool,
     compile_model: bool,
+    model_backend: str | None,
     parallelism: int,
     devices: list[str] | None,
 ) -> dict[str, Any]:
@@ -579,6 +628,7 @@ def _run_suite_parallel(
             device=assigned_device,
             amp=amp,
             compile_model=compile_model,
+            model_backend=model_backend,
             suite_dir=suite_dir,
             variant_state=variant_state,
         )
@@ -651,6 +701,7 @@ def run_suite_all_datasets(
     device: str | None = None,
     amp: bool = False,
     compile_model: bool = False,
+    model_backend: str | None = None,
     parallelism: int = 1,
     devices: list[str] | None = None,
     resume_root: str | Path | None = None,
@@ -677,6 +728,7 @@ def run_suite_all_datasets(
                 device=device,
                 amp=amp,
                 compile_model=compile_model,
+                model_backend=model_backend,
                 resume_suite=resume_suite,
                 parallelism=parallelism,
                 devices=devices,
@@ -685,6 +737,7 @@ def run_suite_all_datasets(
                 "status": "completed",
                 "suite_dir": result["suite_dir"],
                 "summary_path": str(Path(result["suite_dir"]) / "suite_summary.json"),
+                "report": result.get("report", []),
             }
         except Exception as exc:
             summary["results"][dataset_name] = {

@@ -86,7 +86,7 @@ def _build_adding(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
     def make_split(size: int) -> SequenceTensorDataset:
         values = torch.rand(size, cfg.sequence_length, 1)
         markers = torch.zeros(size, cfg.sequence_length, 1)
-        pos = torch.randint(0, cfg.sequence_length, (size, 2))
+        pos = torch.stack([torch.randperm(cfg.sequence_length)[:2] for _ in range(size)])
         for idx in range(size):
             markers[idx, pos[idx, 0], 0] = 1
             markers[idx, pos[idx, 1], 0] = 1

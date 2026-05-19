@@ -10,8 +10,8 @@ import torch
 
 from ..analysis import plot_run_diagnostics
 from ..config import ExperimentConfig
-from ..datasets import apply_dataset_defaults, build_dataloaders
-from ..utils import ensure_dir, now_timestamp, save_json, set_seed
+from ..datasets import apply_dataset_defaults, build_dataloaders, collect_frequency_init_samples
+from ..utils import ensure_dir, fft_spectrum_summary, now_timestamp, save_json, set_seed, topk_frequency_init
 
 
 def _import_jax_stack():
@@ -65,7 +65,22 @@ def _profile_for_dataset(cfg: ExperimentConfig) -> None:
             setattr(s5, key, value)
 
 
-def _build_model(eqx, jax, cfg: ExperimentConfig):
+def _frequency_centers(jnp, cfg: ExperimentConfig, train_loader) -> Any | None:
+    if cfg.model.frequency_init == "random":
+        return None
+    sample = collect_frequency_init_samples(train_loader)
+    bins, power = fft_spectrum_summary(sample)
+    mode = {
+        "log": "log",
+        "quantile": "quantile",
+        "hybrid": "hybrid",
+        "diverse": "hybrid",
+    }.get(cfg.model.frequency_init, "quantile")
+    selected = topk_frequency_init(bins, power, cfg.model.s5rf.num_blocks, mode)
+    return jnp.asarray(selected.detach().cpu().numpy().astype(np.float32))
+
+
+def _build_model(eqx, jax, cfg: ExperimentConfig, frequency_centers=None):
     from .model import S5RFClassifier
 
     key = jax.random.PRNGKey(cfg.training.seed)
@@ -90,6 +105,7 @@ def _build_model(eqx, jax, cfg: ExperimentConfig):
         gating_temperature=cfg.model.gating.temperature,
         gating_sigma=cfg.model.gating.sigma,
         gating_spectral_bins=cfg.model.gating.num_spectral_bins,
+        frequency_centers=frequency_centers,
     )
 
 
@@ -146,7 +162,8 @@ def run_s5rf_experiment(cfg: ExperimentConfig, *, run_dir: str | Path | None = N
 
     out_dir = ensure_dir(run_dir) if run_dir is not None else ensure_dir(Path(cfg.training.save_dir) / f"{cfg.name}-{now_timestamp()}")
     train_loader, val_loader, test_loader = build_dataloaders(cfg.dataset)
-    model = _build_model(eqx, jax, cfg)
+    frequency_centers = _frequency_centers(jnp, cfg, train_loader)
+    model = _build_model(eqx, jax, cfg, frequency_centers)
     optim, opt_state = _optimizer(eqx, jax, optax, model, cfg, len(train_loader))
     rng_key = jax.random.PRNGKey(cfg.training.seed + 1)
 
@@ -155,9 +172,21 @@ def run_s5rf_experiment(cfg: ExperimentConfig, *, run_dir: str | Path | None = N
         loss = optax.softmax_cross_entropy(logits=logits, labels=y).mean()
         return loss, logits
 
+    def objective_fn(current_model, key, x, y):
+        loss, logits = loss_fn(current_model, key, x, y)
+        reg_loss = current_model.regularization_loss(
+            x,
+            diversity_weight=cfg.model.regularization.diversity_weight,
+            orthogonality_weight=cfg.model.regularization.orthogonality_weight,
+            energy_weight=cfg.model.regularization.energy_weight,
+            gate_l1_penalty=cfg.model.gating.l1_penalty,
+        )
+        loss = loss + reg_loss
+        return loss, logits
+
     @eqx.filter_jit
     def train_step(current_model, state, key, x, y):
-        (loss, logits), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(current_model, key, x, y)
+        (loss, logits), grads = eqx.filter_value_and_grad(objective_fn, has_aux=True)(current_model, key, x, y)
         updates, state = optim.update(grads, state, current_model)
         current_model = eqx.apply_updates(current_model, updates)
         acc = jnp.mean(jnp.argmax(logits, axis=-1) == jnp.argmax(y, axis=-1))
@@ -167,15 +196,25 @@ def run_s5rf_experiment(cfg: ExperimentConfig, *, run_dir: str | Path | None = N
     def eval_step(current_model, key, x, y):
         loss, logits = loss_fn(current_model, key, x, y)
         acc = jnp.mean(jnp.argmax(logits, axis=-1) == jnp.argmax(y, axis=-1))
-        spikes = jax.vmap(current_model.gen_spikes)(x).mean(axis=0)
+        diag = jax.vmap(current_model.diagnostics)(x)
         energy_mj = jax.vmap(current_model.energy_proxy_mj)(x).mean()
+        effective_energy_mj = jax.vmap(current_model.effective_energy_proxy_mj)(x).mean()
         return {
             "loss": loss,
             "accuracy": acc,
-            "avg_spikes": spikes.mean(),
-            "spike_rate": spikes.mean() / max(cfg.dataset.sequence_length, 1),
+            "avg_spikes": diag["avg_spikes"].mean(),
+            "spike_rate": diag["spike_rate"].mean(),
             "energy_mj": energy_mj,
+            "effective_energy_proxy_mj": effective_energy_mj,
             "energy_proxy_mj": energy_mj,
+            "branch_utilization_entropy": diag["branch_utilization_entropy"].mean(),
+            "branch_amplitude_mean": diag["branch_amplitude_mean"].mean(),
+            "membrane_amplitude_mean": diag["membrane_amplitude_mean"].mean(),
+            "gate_mean": diag["gate_mean"].mean(),
+            "gate_entropy": diag["gate_entropy"].mean(),
+            "active_blocks_mean": diag["active_blocks_mean"].mean(),
+            "rho_mean": diag["rho_mean"].mean(),
+            "omega_mean": diag["omega_mean"].mean(),
         }
 
     def run_eval(loader) -> dict[str, float]:
@@ -187,6 +226,15 @@ def run_s5rf_experiment(cfg: ExperimentConfig, *, run_dir: str | Path | None = N
             "spike_rate": [],
             "energy_mj": [],
             "energy_proxy_mj": [],
+            "effective_energy_proxy_mj": [],
+            "branch_utilization_entropy": [],
+            "branch_amplitude_mean": [],
+            "membrane_amplitude_mean": [],
+            "gate_mean": [],
+            "gate_entropy": [],
+            "active_blocks_mean": [],
+            "rho_mean": [],
+            "omega_mean": [],
         }
         for x_t, y_t in loader:
             x, y = _prep_batch(jnp, x_t, y_t, cfg.dataset.num_classes)

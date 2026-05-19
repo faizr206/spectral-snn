@@ -44,6 +44,8 @@ class RF(eqx.Module):
     lam: jax.Array
     v: jax.Array
     log_step: jax.Array
+    num_blocks: int = eqx.field(static=True)
+    block_size: int = eqx.field(static=True)
     keep_imag: bool = eqx.field(static=True)
     discretization: str = eqx.field(static=True)
     activation: str = eqx.field(static=True)
@@ -58,19 +60,40 @@ class RF(eqx.Module):
         keep_imag: bool,
         discretization: str,
         activation: str,
+        num_blocks: int,
+        block_size: int,
+        frequency_centers: jax.Array | None = None,
     ) -> None:
+        if frequency_centers is not None:
+            imag = jnp.repeat(frequency_centers, block_size)
+            lam = lam.at[..., 1].set(imag)
         self.lam = jnp.stack([jnp.log(-lam[..., 0]), lam[..., 1]], axis=-1)
         self.v = v
         self.log_step = init_log_steps(key, (v.shape[0], eta_min, eta_max))
+        self.num_blocks = num_blocks
+        self.block_size = block_size
         self.keep_imag = keep_imag
         self.discretization = discretization
         self.activation = activation
+
+    def continuous_lambda(self) -> jax.Array:
+        return -jnp.exp(self.lam[..., 0]) + 1j * self.lam[..., 1]
+
+    def block_omega(self) -> jax.Array:
+        omega = jnp.abs(self.continuous_lambda().imag)
+        return omega.reshape(self.num_blocks, self.block_size).mean(axis=1)
+
+    def block_rho(self) -> jax.Array:
+        lam = self.continuous_lambda()
+        step = jnp.exp(self.log_step[:, 0])
+        rho = jnp.abs(jnp.exp(lam * step))
+        return rho.reshape(self.num_blocks, self.block_size).mean(axis=1)
 
     def __call__(self, u: jax.Array) -> jax.Array:
         if self.keep_imag:
             u = real_to_complex(u)
 
-        lam = -jnp.exp(self.lam[..., 0]) + 1j * self.lam[..., 1]
+        lam = self.continuous_lambda()
         step = jnp.exp(self.log_step[:, 0])
         if self.discretization == "dirac":
             disc_fn = discretize_dirac
@@ -128,6 +151,7 @@ class BlockGate(eqx.Module):
     sequence_b: jax.Array | None
     static_logits: jax.Array | None
     spectral_w: jax.Array | None
+    default_centers: jax.Array
 
     def __init__(
         self,
@@ -140,6 +164,7 @@ class BlockGate(eqx.Module):
         num_blocks: int,
         block_size: int,
         spectral_bins: int,
+        default_centers: jax.Array | None = None,
     ) -> None:
         self.mode = mode
         self.top_k = top_k
@@ -151,6 +176,9 @@ class BlockGate(eqx.Module):
         self.sequence_b = None
         self.static_logits = None
         self.spectral_w = None
+        if default_centers is None:
+            default_centers = jnp.linspace(0.0, jnp.pi, num_blocks)
+        self.default_centers = default_centers
         if mode == "sequence":
             key, w_key = jax.random.split(key)
             self.sequence_w = jax.random.normal(w_key, (num_blocks, num_blocks)) * (1.0 / max(num_blocks, 1) ** 0.5)
@@ -166,12 +194,22 @@ class BlockGate(eqx.Module):
         values = values.reshape(values.shape[0], self.num_blocks, self.block_size)
         return values.mean(axis=-1)
 
-    def _response_scores(self, x: jax.Array) -> jax.Array:
+    def _fft_scores(self, x: jax.Array) -> jax.Array:
         values = self._block_values(x)
         spectrum = jnp.abs(jnp.fft.rfft(values, axis=0)) ** 2
-        bins = jnp.linspace(0.0, 1.0, spectrum.shape[0])
-        centers = jnp.linspace(0.0, 1.0, self.num_blocks)
+        bins = jnp.linspace(0.0, jnp.pi, spectrum.shape[0])
+        centers = self.default_centers
         weights = jnp.exp(-0.5 * ((bins[:, None] - centers[None, :]) / self.sigma) ** 2)
+        return (spectrum * weights).sum(axis=0) / jnp.maximum(weights.sum(axis=0), 1e-6)
+
+    def _response_scores(self, x: jax.Array, omega: jax.Array, rho: jax.Array) -> jax.Array:
+        values = self._block_values(x)
+        spectrum = jnp.abs(jnp.fft.rfft(values, axis=0)) ** 2
+        bins = jnp.linspace(0.0, jnp.pi, spectrum.shape[0])
+        delta = omega[:, None] - bins[None, :]
+        denom = 1.0 + rho[:, None] ** 2 - 2.0 * rho[:, None] * jnp.cos(delta)
+        response = 1.0 / jnp.maximum(denom, 1e-6)
+        weights = response.T
         return (spectrum * weights).sum(axis=0) / jnp.maximum(weights.sum(axis=0), 1e-6)
 
     def _linear_spectral_scores(self, x: jax.Array) -> jax.Array:
@@ -189,9 +227,9 @@ class BlockGate(eqx.Module):
         gate = jax.nn.softmax(scores / self.temperature, axis=-1)
         return gate * self.num_blocks
 
-    def __call__(self, x: jax.Array) -> jax.Array:
+    def gates(self, x: jax.Array, omega: jax.Array | None = None, rho: jax.Array | None = None) -> jax.Array | None:
         if self.mode == "none":
-            return x
+            return None
         block_values = self._block_values(x)
         if self.mode == "sequence":
             scores = block_values @ self.sequence_w + self.sequence_b
@@ -199,8 +237,14 @@ class BlockGate(eqx.Module):
         elif self.mode == "static":
             gate = self._normalize(self.static_logits)
             gate = jnp.broadcast_to(gate, block_values.shape)
-        elif self.mode in {"spectral_fft", "spectral_response", "spectral_stft"}:
-            gate = self._normalize(self._response_scores(x))
+        elif self.mode in {"spectral_fft", "spectral_stft"}:
+            gate = self._normalize(self._fft_scores(x))
+            gate = jnp.broadcast_to(gate, block_values.shape)
+        elif self.mode == "spectral_response":
+            if omega is None or rho is None:
+                gate = self._normalize(self._fft_scores(x))
+            else:
+                gate = self._normalize(self._response_scores(x, omega, rho))
             gate = jnp.broadcast_to(gate, block_values.shape)
         elif self.mode == "response_energy":
             gate = self._normalize(block_values.mean(axis=0))
@@ -210,6 +254,12 @@ class BlockGate(eqx.Module):
             gate = jnp.broadcast_to(gate, block_values.shape)
         else:
             raise ValueError(f"Unsupported S5-RF gating mode: {self.mode}")
+        return gate
+
+    def __call__(self, x: jax.Array, omega: jax.Array | None = None, rho: jax.Array | None = None) -> jax.Array:
+        gate = self.gates(x, omega, rho)
+        if gate is None:
+            return x
         gate = jnp.repeat(gate, self.block_size, axis=-1)
         return x * gate[..., None] if x.ndim == 3 else x * gate
 
@@ -262,6 +312,7 @@ class S5RFClassifier(eqx.Module):
         gating_temperature: float = 1.0,
         gating_sigma: float = 0.35,
         gating_spectral_bins: int = 8,
+        frequency_centers: jax.Array | None = None,
     ) -> None:
         if len(num_blocks) != len(num_neurons):
             raise ValueError("num_blocks and num_neurons must have equal length")
@@ -276,6 +327,7 @@ class S5RFClassifier(eqx.Module):
             block_size = int(neurons / blocks)
             lam, v, vinv = init_a(int(neurons / blocks), blocks)
             v = v if discretization == "zoh" and index == 0 else jnp.eye(v.shape[0])
+            layer_centers = frequency_centers if frequency_centers is not None else jnp.abs(lam[..., 1]).reshape(blocks, block_size).mean(axis=1)
             self.dense_layers.append(RFDense(dense_key, prev_v.shape[0], vinv.shape[1], vinv, keep_imag))
             self.gate_layers.append(
                 BlockGate(
@@ -287,6 +339,7 @@ class S5RFClassifier(eqx.Module):
                     num_blocks=blocks,
                     block_size=block_size,
                     spectral_bins=gating_spectral_bins,
+                    default_centers=layer_centers,
                 )
             )
             self.neuron_layers.append(
@@ -299,6 +352,9 @@ class S5RFClassifier(eqx.Module):
                     keep_imag=keep_imag,
                     discretization=discretization if index == 0 else "dirac",
                     activation=activation,
+                    num_blocks=blocks,
+                    block_size=block_size,
+                    frequency_centers=frequency_centers,
                 )
             )
             prev_v = v
@@ -314,7 +370,7 @@ class S5RFClassifier(eqx.Module):
             if self.apply_skip and index != 0:
                 skip = x
             x = jax.vmap(dense)(x)
-            x = gate(x)
+            x = gate(x, neuron.block_omega(), neuron.block_rho())
             if self.dense_dropout and index != 0 and index < len(self.neuron_layers) - 1:
                 x = self.drop(x, key=drop_key)
             x = neuron(x)
@@ -332,11 +388,84 @@ class S5RFClassifier(eqx.Module):
             if self.apply_skip and index != 0:
                 skip = x
             x = jax.vmap(dense)(x)
-            x = gate(x)
+            x = gate(x, neuron.block_omega(), neuron.block_rho())
             spikes = neuron(x)
             totals.append(spikes.sum())
             x = spikes + skip if self.apply_skip and index != 0 and index < len(self.neuron_layers) - 1 else spikes
         return jnp.asarray(totals)
+
+    def diagnostics(self, x: jax.Array) -> dict[str, jax.Array]:
+        spike_rates = []
+        spike_totals = []
+        branch_contrib = []
+        branch_amplitudes = []
+        membrane_amplitudes = []
+        gate_means = []
+        gate_entropies = []
+        active_blocks = []
+        rho_values = []
+        omega_values = []
+        for index, (dense, gate, neuron) in enumerate(zip(self.dense_layers, self.gate_layers, self.neuron_layers)):
+            if self.apply_skip and index != 0:
+                skip = x
+            x = jax.vmap(dense)(x)
+            omega = neuron.block_omega()
+            rho = neuron.block_rho()
+            gate_values = gate.gates(x, omega, rho)
+            if gate_values is None:
+                gated_x = x
+                gate_values = jnp.zeros((x.shape[0], gate.num_blocks))
+            else:
+                repeated_gate = jnp.repeat(gate_values, gate.block_size, axis=-1)
+                gated_x = x * repeated_gate[..., None] if x.ndim == 3 else x * repeated_gate
+                probs = gate_values / jnp.maximum(gate_values.sum(axis=-1, keepdims=True), 1e-6)
+                gate_entropies.append(-(probs * jnp.log(jnp.maximum(probs, 1e-8))).sum(axis=-1).mean())
+                active_blocks.append((gate_values > 1e-4).astype(jnp.float32).sum(axis=-1).mean())
+            spikes = neuron(gated_x)
+            spike_totals.append(spikes.sum())
+            spike_rates.append(spikes.mean())
+            values = jnp.abs(real_to_complex(gated_x)) if gated_x.ndim == 3 else jnp.abs(gated_x)
+            block_values = values.reshape(values.shape[0], gate.num_blocks, gate.block_size).mean(axis=(0, 2))
+            norm = block_values / jnp.maximum(block_values.sum(), 1e-8)
+            branch_contrib.append(-(norm * jnp.log(jnp.maximum(norm, 1e-8))).sum())
+            branch_amplitudes.append(jnp.abs(gated_x).mean())
+            membrane_amplitudes.append(spikes.mean())
+            gate_means.append(gate_values.mean())
+            rho_values.append(rho.mean())
+            omega_values.append(omega.mean())
+            x = spikes + skip if self.apply_skip and index != 0 and index < len(self.neuron_layers) - 1 else spikes
+        zero = jnp.asarray(0.0, dtype=jnp.float32)
+        return {
+            "avg_spikes": jnp.stack(spike_totals).mean(),
+            "spike_rate": jnp.stack(spike_rates).mean(),
+            "branch_utilization_entropy": jnp.stack(branch_contrib).mean(),
+            "branch_amplitude_mean": jnp.stack(branch_amplitudes).mean(),
+            "membrane_amplitude_mean": jnp.stack(membrane_amplitudes).mean(),
+            "gate_mean": jnp.stack(gate_means).mean(),
+            "gate_entropy": jnp.stack(gate_entropies).mean() if gate_entropies else zero,
+            "active_blocks_mean": jnp.stack(active_blocks).mean() if active_blocks else zero,
+            "rho_mean": jnp.stack(rho_values).mean(),
+            "omega_mean": jnp.stack(omega_values).mean(),
+        }
+
+    def regularization_loss(self, x: jax.Array, *, diversity_weight: float, orthogonality_weight: float, energy_weight: float, gate_l1_penalty: float) -> jax.Array:
+        loss = jnp.asarray(0.0, dtype=jnp.float32)
+        if diversity_weight <= 0 and orthogonality_weight <= 0 and energy_weight <= 0 and gate_l1_penalty <= 0:
+            return loss
+        diag = jax.vmap(self.diagnostics)(x)
+        if energy_weight > 0:
+            loss = loss + energy_weight * diag["spike_rate"].mean()
+        if gate_l1_penalty > 0:
+            loss = loss + gate_l1_penalty * diag["gate_mean"].mean()
+        if diversity_weight > 0:
+            omegas = jnp.concatenate([layer.block_omega() for layer in self.neuron_layers], axis=0)
+            diff = omegas[:, None] - omegas[None, :]
+            loss = loss + diversity_weight * jnp.exp(-(diff**2) / 0.1).mean()
+        if orthogonality_weight > 0:
+            entropies = diag["branch_utilization_entropy"]
+            target = jnp.log(jnp.asarray(self.gate_layers[0].num_blocks, dtype=jnp.float32))
+            loss = loss + orthogonality_weight * ((target - entropies) ** 2).mean()
+        return loss
 
     def energy_proxy_mj(self, x: jax.Array) -> jax.Array:
         sequence_length = x.shape[0]
@@ -349,6 +478,26 @@ class S5RFClassifier(eqx.Module):
             hidden_dim = dense.b.shape[0]
             dense_ops += float(sequence_length * prev_dim * hidden_dim)
             ssm_ops += float(sequence_length * hidden_dim)
+            gate_ops += gate.op_count(sequence_length)
+            prev_dim = hidden_dim
+        dense_ops += float(sequence_length * prev_dim * self.output_dense.b.shape[0])
+        ssm_ops += float(sequence_length * self.li.dim)
+        return 0.9e-3 * spike_ops + 0.02e-3 * dense_ops + 0.05e-3 * ssm_ops + 0.01e-3 * gate_ops
+
+    def effective_energy_proxy_mj(self, x: jax.Array) -> jax.Array:
+        diag = self.diagnostics(x)
+        active_fraction = jnp.minimum(diag["active_blocks_mean"] / max(float(self.gate_layers[0].num_blocks), 1.0), 1.0)
+        active_fraction = jnp.where(diag["active_blocks_mean"] > 0, active_fraction, 1.0)
+        sequence_length = x.shape[0]
+        spike_ops = self.gen_spikes(x).sum()
+        dense_ops = 0.0
+        ssm_ops = 0.0
+        gate_ops = 0.0
+        prev_dim = x.shape[-1]
+        for dense, gate, neuron in zip(self.dense_layers, self.gate_layers, self.neuron_layers):
+            hidden_dim = dense.b.shape[0]
+            dense_ops += float(sequence_length * prev_dim * hidden_dim)
+            ssm_ops += float(sequence_length * hidden_dim) * active_fraction
             gate_ops += gate.op_count(sequence_length)
             prev_dim = hidden_dim
         dense_ops += float(sequence_length * prev_dim * self.output_dense.b.shape[0])

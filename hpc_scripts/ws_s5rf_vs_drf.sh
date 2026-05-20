@@ -20,10 +20,12 @@ echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | hea
 cd "${PR}"
 
 # Install JAX stack if not present
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_FLAGS="--xla_gpu_force_compilation_parallelism=1"
 echo "=== Checking JAX stack ==="
 ${RUN} -c "import jax; import equinox; import optax; print('JAX', jax.__version__, 'OK')" 2>/dev/null || {
     echo "Installing JAX stack..."
-    uv pip install "jax[cuda12]>=0.4.30" "equinox>=0.11" "optax>=0.2" -q
+    uv pip install "jax[cuda12]>=0.4.30,<0.6" "equinox>=0.11" "optax>=0.2" -q
 }
 ${RUN} -c "import jax; print('JAX devices:', jax.devices())"
 

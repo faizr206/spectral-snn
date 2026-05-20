@@ -204,6 +204,8 @@ class DendriticRFBlock(nn.Module):
         self.runtime_progress = 1.0
 
     def _feature_dim(self) -> int:
+        if self.cfg.branch_readout == "weighted_sum":
+            return self.cfg.d_model
         if self.cfg.branch_readout == "real_imag":
             return self.cfg.d_model * self.cfg.num_branches * 2
         if self.cfg.branch_readout == "magnitude":
@@ -232,6 +234,18 @@ class DendriticRFBlock(nn.Module):
 
     def gamma(self) -> torch.Tensor:
         return F.softplus(self.gamma_hat) + 1e-3
+
+    def _dynamics_terms(self, branch_indices: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        rho = self.rho()
+        omega = self.omega()
+        gamma = self.gamma()
+        if branch_indices is not None:
+            rho = rho.index_select(1, branch_indices)
+            omega = omega.index_select(1, branch_indices)
+            gamma = gamma.index_select(1, branch_indices)
+        rho_cos = rho * torch.cos(omega)
+        rho_sin = rho * torch.sin(omega)
+        return rho, gamma, rho_cos, rho_sin, omega
 
     def set_runtime_context(self, progress: float) -> None:
         self.runtime_progress = float(progress)
@@ -282,6 +296,39 @@ class DendriticRFBlock(nn.Module):
         response = gamma.unsqueeze(1).square() / denom.clamp(min=1e-6)
         response = response / response.sum(dim=-1, keepdim=True).clamp(min=1e-6)
         return power @ response.transpose(0, 1)
+
+    def _spectral_scores(self, x: torch.Tensor) -> torch.Tensor:
+        power, freqs = self._sequence_spectrum(x)
+        if self.cfg.gating.mode == "spectral_fft":
+            return self._gaussian_band_scores(power, freqs)
+        if self.cfg.gating.mode == "spectral_response":
+            return self._response_band_scores(power, freqs)
+        raise ValueError(f"Sparse spectral execution does not support {self.cfg.gating.mode}")
+
+    def _sparse_execution_enabled(self) -> bool:
+        if not self.cfg.gating.sparse_execution:
+            return False
+        if self.cfg.gating.mode not in {"spectral_fft", "spectral_response"}:
+            return False
+        if not (0 < self.cfg.gating.top_k < self.cfg.num_branches):
+            return False
+        if self.cfg.stochastic.mode != "none":
+            return False
+        if self.cfg.smooth_reset.mode in {"exact", "detached", "parallel_soma"}:
+            return False
+        if self.cfg.gating.gate_floor > 0:
+            return False
+        if self.cfg.gating.smoothing > 0:
+            return False
+        if self.cfg.gating.l1_penalty > 0:
+            return False
+        if self.cfg.competition != "none":
+            return False
+        if self.cfg.normalization.mode == "branch_rmsnorm":
+            return False
+        if self.cfg.stochastic.branch_noise_std > 0 or self.cfg.stochastic.k_damping_beta > 0:
+            return False
+        return True
 
     def _spectral_bin_bank(self, freqs: torch.Tensor) -> torch.Tensor:
         count = self.cfg.gating.num_spectral_bins
@@ -463,6 +510,8 @@ class DendriticRFBlock(nn.Module):
         return branch_outputs * damp, branch_imag * damp
 
     def _branch_features(self, real: torch.Tensor, imag: torch.Tensor) -> torch.Tensor:
+        if self.cfg.branch_readout == "weighted_sum":
+            return (real * self.branch_weight.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
         if self.cfg.branch_readout == "real_imag":
             feat = torch.cat([real, imag], dim=-1)
         elif self.cfg.branch_readout == "magnitude":
@@ -471,12 +520,12 @@ class DendriticRFBlock(nn.Module):
             feat = real
         return feat.flatten(-2)
 
-    def _parallel_update(self, branch_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _parallel_update(self, branch_input: torch.Tensor, branch_indices: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         # branch_input: [B, T, H, N]
         bsz, steps, hidden, branches = branch_input.shape
-        coeff = self.rho() * torch.exp(1j * self.omega())
-        gamma = self.gamma()
-        powers = torch.arange(steps, device=branch_input.device, dtype=branch_input.dtype)
+        rho, gamma, _, _, omega = self._dynamics_terms(branch_indices)
+        coeff = rho * torch.exp(1j * omega)
+        powers = torch.arange(steps, device=branch_input.device, dtype=torch.float32)
         kernel = gamma.unsqueeze(-1) * coeff.pow(powers[:, None, None]).permute(1, 2, 0)  # [H, N, T]
         x = branch_input.permute(0, 2, 3, 1).reshape(bsz, hidden * branches, steps).to(torch.complex64)
         k = kernel.reshape(hidden * branches, steps).to(torch.complex64)
@@ -488,26 +537,36 @@ class DendriticRFBlock(nn.Module):
         y = y.view(bsz, hidden, branches, steps).permute(0, 3, 1, 2)
         return y.real, y.imag
 
-    def _sequential_update(self, branch_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _sequential_update(self, branch_input: torch.Tensor, branch_indices: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         bsz, steps, hidden, branches = branch_input.shape
         real = torch.zeros(bsz, hidden, branches, device=branch_input.device, dtype=branch_input.dtype)
         imag = torch.zeros_like(real)
         reset_trace = torch.zeros(bsz, hidden, branches, device=branch_input.device, dtype=branch_input.dtype)
-        rho = self.rho().to(branch_input.device)
-        omega = self.omega().to(branch_input.device)
-        gamma = self.gamma().to(branch_input.device)
+        rho, gamma, rho_cos, rho_sin, _ = self._dynamics_terms(branch_indices)
+        rho = rho.to(branch_input.device)
+        gamma = gamma.to(branch_input.device)
+        rho_cos = rho_cos.to(branch_input.device)
+        rho_sin = rho_sin.to(branch_input.device)
         beta = F.softplus(self.reset_beta).to(branch_input.device)
+        if branch_indices is not None:
+            beta = beta.index_select(1, branch_indices)
         out_r = []
         out_i = []
         for t in range(steps):
-            damp = rho
+            damp_cos = rho_cos
+            damp_sin = rho_sin
             if self.cfg.smooth_reset.mode in {"exact", "detached"}:
                 trace = reset_trace.detach() if self.cfg.smooth_reset.detach_trace else reset_trace
                 damp = torch.clamp(rho * torch.exp(-beta * trace), min=0.0, max=1.0)
-            next_real = damp * (torch.cos(omega) * real - torch.sin(omega) * imag) + gamma * branch_input[:, t]
-            next_imag = damp * (torch.sin(omega) * real + torch.cos(omega) * imag)
+                cos = damp / rho.clamp(min=1e-6) * rho_cos
+                sin = damp / rho.clamp(min=1e-6) * rho_sin
+                damp_cos = cos
+                damp_sin = sin
+            next_real = damp_cos * real - damp_sin * imag + gamma * branch_input[:, t]
+            next_imag = damp_sin * real + damp_cos * imag
             real, imag = next_real, next_imag
-            branch_sum = (real * self.branch_weight.unsqueeze(0)).sum(dim=-1)
+            branch_weight = self.branch_weight if branch_indices is None else self.branch_weight.index_select(1, branch_indices)
+            branch_sum = (real * branch_weight.unsqueeze(0)).sum(dim=-1)
             reset_spike = self.spike_op(branch_sum - self.cfg.threshold.base, self.cfg.surrogate_scale)
             reset_trace = reset_trace * self.cfg.smooth_reset.lambda_r + reset_spike.unsqueeze(-1)
             out_r.append(real)
@@ -520,12 +579,36 @@ class DendriticRFBlock(nn.Module):
         self.runtime_dtype = x.dtype
         self.runtime_device = x.device
         branch_input = self.input_proj(x).view(x.shape[0], x.shape[1], self.cfg.d_model, self.cfg.num_branches)
-        if self.cfg.parallel and self.cfg.smooth_reset.mode not in {"exact", "detached"}:
+        sparse_indices = None
+        gates = gate_probs = gate_variance = channel_count = None
+        if self._sparse_execution_enabled():
+            scores = self._spectral_scores(x)
+            gate = self._apply_gate_constraints(scores)
+            _, topk_idx = torch.topk(scores, self.cfg.gating.top_k, dim=-1)
+            sparse_indices = torch.unique(topk_idx.flatten()).sort().values
+            if sparse_indices.numel() > 0 and sparse_indices.numel() < self.cfg.num_branches:
+                gates = gate.unsqueeze(1).expand(-1, x.shape[1], -1)
+                gate_probs = gates
+                branch_input_sparse = branch_input.index_select(3, sparse_indices)
+                if self.cfg.parallel:
+                    sparse_real, sparse_imag = self._parallel_update(branch_input_sparse, sparse_indices)
+                else:
+                    sparse_real, sparse_imag = self._sequential_update(branch_input_sparse, sparse_indices)
+                branch_real = branch_input.new_zeros(x.shape[0], x.shape[1], self.cfg.d_model, self.cfg.num_branches)
+                branch_imag = torch.zeros_like(branch_real)
+                branch_real.index_copy_(3, sparse_indices, sparse_real)
+                branch_imag.index_copy_(3, sparse_indices, sparse_imag)
+            else:
+                sparse_indices = None
+
+        if sparse_indices is None and self.cfg.parallel and self.cfg.smooth_reset.mode not in {"exact", "detached"}:
             branch_real, branch_imag = self._parallel_update(branch_input)
         else:
-            branch_real, branch_imag = self._sequential_update(branch_input)
+            if sparse_indices is None:
+                branch_real, branch_imag = self._sequential_update(branch_input)
 
-        gates, gate_probs, gate_variance, channel_count = self._compute_gates(x, branch_real, branch_imag)
+        if gates is None:
+            gates, gate_probs, gate_variance, channel_count = self._compute_gates(x, branch_real, branch_imag)
 
         branch_outputs = branch_real
         gated_imag = branch_imag
@@ -556,7 +639,7 @@ class DendriticRFBlock(nn.Module):
         soma = self.readout_proj(self.dropout(features))
         soma = soma + x
         threshold_noise = self._threshold_noise(gate_probs, gate_variance, soma.shape[-1])
-        if self.cfg.smooth_reset.mode == "parallel_soma":
+        if self.cfg.smooth_reset.mode == "parallel_soma" and self.cfg.threshold.enabled:
             spikes_a, _ = self.threshold(soma, self.spike_op, self.cfg.surrogate_scale, threshold_noise)
             reset = []
             trace = torch.zeros_like(spikes_a[:, 0])
@@ -565,7 +648,11 @@ class DendriticRFBlock(nn.Module):
                 reset.append(trace)
             reset_trace = torch.stack(reset, dim=1)
             soma = soma * torch.exp(-self.cfg.smooth_reset.beta * reset_trace)
-        spikes, thresholds = self.threshold(soma, self.spike_op, self.cfg.surrogate_scale, threshold_noise)
+        if self.cfg.threshold.enabled:
+            spikes, thresholds = self.threshold(soma, self.spike_op, self.cfg.surrogate_scale, threshold_noise)
+        else:
+            thresholds = torch.full_like(soma, self.cfg.threshold.base)
+            spikes = self.spike_op(soma - thresholds, self.cfg.surrogate_scale)
         out = self.output_proj(spikes) + soma
         if self.cfg.normalization.mode == "soma_rmsnorm" and self.norm is not None:
             out = self.norm(out)

@@ -19,6 +19,9 @@ class DatasetConfig:
     permuted: bool = False
     normalize: bool = True
     cache_fft_init: bool = True
+    pin_memory: bool = True
+    persistent_workers: bool = True
+    prefetch_factor: int = 2
 
 
 @dataclass
@@ -58,6 +61,7 @@ class GatingConfig:
     spectral_bins: str = "branch_centered"
     gate_floor: float = 0.0
     detach_router: bool = False
+    sparse_execution: bool = False
 
 
 @dataclass
@@ -181,9 +185,10 @@ class TrainingConfig:
     grad_clip: float = 1.0
     seed: int = 42
     device: str = "cuda"
-    amp: bool = False
+    amp: bool = True
     log_every: int = 50
     eval_every: int = 1
+    diagnostics_every: int = 1
     save_dir: str = "./runs"
     compile_model: bool = False
     label_smoothing: float = 0.0

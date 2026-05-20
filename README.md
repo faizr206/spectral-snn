@@ -203,7 +203,7 @@ The code organizes the plan into suites:
 - `spectral_gating_jax_clean`
 - `full_plan`
 
-`full_plan` is the broad experiment matrix. `spectral_gating_plan` is the gating-only matrix from [something/drf_spectral_gating_experiment_plan.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_spectral_gating_experiment_plan.md:1), covering:
+`full_plan` is the broad experiment matrix. `spectral_gating_plan` is the compact PyTorch gating-only matrix from [something/drf_spectral_gating_experiment_plan.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_spectral_gating_experiment_plan.md:1), covering:
 
 - baseline D-RF
 - existing MLP gate
@@ -213,9 +213,9 @@ The code organizes the plan into suites:
 - chunk-wise STFT spectral gate
 - response-energy gate
 - linear spectral gate
-- top-k spectral resonance routing
-- frequency-initialization plus spectral routing
-- stochastic ion-channel-inspired gating variants and controls from [something/drf_stochastic_ion_channel_variants.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_stochastic_ion_channel_variants.md:1)
+- representative top-k spectral resonance routing
+- diverse-frequency initialization plus spectral routing
+- one stochastic ion-channel-inspired gating variant from [something/drf_stochastic_ion_channel_variants.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_stochastic_ion_channel_variants.md:1)
 
 `spectral_gating_jax_clean` is the S5-RF/JAX-friendly subset of `spectral_gating_plan`. It keeps the deterministic spectral routing variants and excludes the stochastic `ion_*` variants.
 

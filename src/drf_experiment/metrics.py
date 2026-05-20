@@ -104,8 +104,9 @@ def gate_statistics(
 
 
 def energy_estimate(spikes: torch.Tensor, branch_outputs: torch.Tensor) -> float:
-    spike_ops = spikes.sum().item()
-    branch_ops = branch_outputs.abs().gt(0).float().sum().item()
+    batch_size = max(int(spikes.shape[0]), 1)
+    spike_ops = spikes.sum().item() / batch_size
+    branch_ops = branch_outputs.abs().gt(0).float().sum().item() / batch_size
     return 0.9e-3 * spike_ops + 0.1e-3 * branch_ops
 
 

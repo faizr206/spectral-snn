@@ -35,6 +35,14 @@ def _format_parameter_count(value: float) -> str:
     return f"{value:.0f}"
 
 
+def _metric_value(metrics: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = metrics.get(key)
+        if value is not None:
+            return float(value)
+    return None
+
+
 def _load_suite_summary_manifests(path: Path) -> list[dict[str, Any]]:
     summary = load_json(path)
     results = summary.get("results", {})
@@ -343,16 +351,18 @@ def plot_training_curves(root: str | Path, output_dir: str | Path, variants: lis
         if variants is not None and variant not in variants:
             continue
         for epoch_entry in manifest.get("history", []):
+            train = epoch_entry["train"]
+            val = epoch_entry.get("val", {})
             frames.append(
                 {
                     "variant": variant,
                     "epoch": epoch_entry["epoch"],
-                    "train_accuracy": epoch_entry["train"].get("accuracy", 0.0),
-                    "val_accuracy": epoch_entry["val"].get("accuracy", 0.0),
-                    "train_loss": epoch_entry["train"].get("loss", 0.0),
-                    "val_loss": epoch_entry["val"].get("loss", 0.0),
-                    "spike_rate": epoch_entry["train"].get("spike_rate", 0.0),
-                    "energy_mj": epoch_entry["train"].get("energy_mj", 0.0),
+                    "train_accuracy": train.get("accuracy", 0.0),
+                    "val_accuracy": val.get("accuracy", 0.0),
+                    "train_loss": train.get("loss", 0.0),
+                    "val_loss": val.get("loss", 0.0),
+                    "spike_rate": train.get("spike_rate", 0.0),
+                    "energy_proxy_mj": _metric_value(train, "energy_proxy_mj", "effective_energy_proxy_mj", "energy_mj"),
                 }
             )
     if not frames:
@@ -366,7 +376,8 @@ def plot_training_curves(root: str | Path, output_dir: str | Path, variants: lis
     axes[0, 1].set_title("Validation Accuracy")
     sns.lineplot(data=df, x="epoch", y="spike_rate", hue="variant", ax=axes[1, 0])
     axes[1, 0].set_title("Spike Rate")
-    sns.lineplot(data=df, x="epoch", y="energy_mj", hue="variant", ax=axes[1, 1])
+    energy_df = df.dropna(subset=["energy_proxy_mj"])
+    sns.lineplot(data=energy_df, x="epoch", y="energy_proxy_mj", hue="variant", ax=axes[1, 1])
     axes[1, 1].set_title("Energy Proxy")
     for ax in axes.flat:
         ax.legend(loc="best", fontsize=8)
@@ -390,13 +401,13 @@ def plot_run_diagnostics(run_dir: str | Path, output_dir: str | Path | None = No
             {
                 "epoch": item["epoch"],
                 "train_accuracy": item["train"].get("accuracy", 0.0),
-                "val_accuracy": item["val"].get("accuracy", 0.0),
+                "val_accuracy": item.get("val", {}).get("accuracy", 0.0),
                 "train_loss": item["train"].get("loss", 0.0),
-                "val_loss": item["val"].get("loss", 0.0),
+                "val_loss": item.get("val", {}).get("loss", 0.0),
                 "spike_rate": item["train"].get("spike_rate", 0.0),
-                "energy_mj": item["train"].get("energy_mj", 0.0),
-                "branch_entropy": item["val"].get("branch_utilization_entropy", 0.0),
-                "membrane_amplitude_mean": item["val"].get("membrane_amplitude_mean", 0.0),
+                "energy_proxy_mj": _metric_value(item["train"], "energy_proxy_mj", "effective_energy_proxy_mj", "energy_mj"),
+                "branch_entropy": item.get("val", {}).get("branch_utilization_entropy", 0.0),
+                "membrane_amplitude_mean": item.get("val", {}).get("membrane_amplitude_mean", 0.0),
             }
             for item in history
         ]
@@ -411,7 +422,7 @@ def plot_run_diagnostics(run_dir: str | Path, output_dir: str | Path | None = No
     sns.lineplot(data=df, x="epoch", y="val_loss", ax=axes[0, 1], label="val")
     axes[0, 1].set_title("Loss")
     sns.lineplot(data=df, x="epoch", y="spike_rate", ax=axes[1, 0], label="spike_rate")
-    sns.lineplot(data=df, x="epoch", y="energy_mj", ax=axes[1, 0], label="energy_mj")
+    sns.lineplot(data=df.dropna(subset=["energy_proxy_mj"]), x="epoch", y="energy_proxy_mj", ax=axes[1, 0], label="energy_proxy_mj")
     axes[1, 0].set_title("Efficiency")
     sns.lineplot(data=df, x="epoch", y="branch_entropy", ax=axes[1, 1], label="branch_entropy")
     sns.lineplot(data=df, x="epoch", y="membrane_amplitude_mean", ax=axes[1, 1], label="membrane_amplitude")

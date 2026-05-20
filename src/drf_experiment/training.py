@@ -57,6 +57,20 @@ def _optimizer(model: DRFNet, cfg: ExperimentConfig) -> torch.optim.Optimizer:
     return torch.optim.AdamW(groups, lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
 
 
+def _is_dynamics_parameter(name: str) -> bool:
+    return any(token in name for token in ["rho_hat", "omega_hat", "gamma_hat"])
+
+
+def _set_dynamics_trainable(model: nn.Module, trainable: bool) -> None:
+    for name, param in model.named_parameters():
+        if _is_dynamics_parameter(name):
+            param.requires_grad_(trainable)
+
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    return getattr(model, "_orig_mod", model)
+
+
 def _loss_fn(cfg: ExperimentConfig) -> nn.Module:
     return nn.CrossEntropyLoss(label_smoothing=cfg.training.label_smoothing)
 
@@ -99,9 +113,10 @@ def _merge_state_tensor(states, attr: str) -> torch.Tensor | None:
     return torch.cat(values, dim=-1)
 
 
-def evaluate(model: DRFNet, loader, cfg: ExperimentConfig, device: torch.device) -> dict[str, float]:
+def evaluate(model: DRFNet, loader, cfg: ExperimentConfig, device: torch.device, *, detailed: bool = True) -> dict[str, float]:
     model.eval()
     model.set_runtime_context(1.0)
+    base_model = _unwrap_model(model)
     meter = EpochMeter()
     criterion = _loss_fn(cfg)
     with torch.inference_mode():
@@ -110,26 +125,32 @@ def evaluate(model: DRFNet, loader, cfg: ExperimentConfig, device: torch.device)
             logits, states = model(x)
             loss = criterion(logits, y)
             spikes = torch.cat([state.spikes for state in states], dim=-1)
-            branch_outputs = torch.cat([state.branch_outputs for state in states], dim=-2)
-            rho = torch.cat([layer.rho().flatten() for layer in model.layers])
-            omega = torch.cat([layer.omega().flatten() for layer in model.layers])
-            gate_values = _merge_gate_values(states)
-            gate_probs = _merge_state_tensor(states, "gate_probs")
-            gate_variance = _merge_state_tensor(states, "gate_variance")
-            channel_count = _merge_state_tensor(states, "channel_count")
             stats = merge_metrics(
                 {"loss": loss.item()},
                 classification_metrics(logits, y),
                 spike_statistics(spikes),
-                branch_statistics(branch_outputs, torch.cat([layer.branch_weight.flatten() for layer in model.layers])),
-                parameter_distributions(rho, omega),
-                gate_statistics(gate_values, gate_probs, gate_variance, channel_count),
-                {
-                    "energy_mj": energy_estimate(spikes, branch_outputs),
-                    "membrane_amplitude_mean": torch.cat([state.soma.abs() for state in states], dim=-1).mean().item(),
-                    "branch_amplitude_mean": branch_outputs.abs().mean().item(),
-                },
             )
+            if detailed:
+                branch_outputs = torch.cat([state.branch_outputs for state in states], dim=-2)
+                rho = torch.cat([layer.rho().flatten() for layer in base_model.layers])
+                omega = torch.cat([layer.omega().flatten() for layer in base_model.layers])
+                gate_values = _merge_gate_values(states)
+                gate_probs = _merge_state_tensor(states, "gate_probs")
+                gate_variance = _merge_state_tensor(states, "gate_variance")
+                channel_count = _merge_state_tensor(states, "channel_count")
+                energy_mj = energy_estimate(spikes, branch_outputs)
+                stats = merge_metrics(
+                    stats,
+                    branch_statistics(branch_outputs, torch.cat([layer.branch_weight.flatten() for layer in base_model.layers])),
+                    parameter_distributions(rho, omega),
+                    gate_statistics(gate_values, gate_probs, gate_variance, channel_count),
+                    {
+                        "energy_mj": energy_mj,
+                        "energy_proxy_mj": energy_mj,
+                        "membrane_amplitude_mean": torch.cat([state.soma.abs() for state in states], dim=-1).mean().item(),
+                        "branch_amplitude_mean": branch_outputs.abs().mean().item(),
+                    },
+                )
             meter.update(stats)
     return meter.summary()
 
@@ -298,8 +319,10 @@ def run_experiment(
             teacher.load_state_dict(torch.load(cfg.model.distillation.teacher_checkpoint, map_location=device))
             teacher.eval()
 
+        compiled_model = False
         if cfg.training.compile_model and hasattr(torch, "compile"):
             model = torch.compile(model)  # type: ignore[assignment]
+            compiled_model = True
 
         optimizer = _optimizer(model, cfg)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(cfg.training.epochs, 1))
@@ -333,6 +356,7 @@ def run_experiment(
                 "best_test": best_test,
                 "parameter_count": parameter_count(model),
                 "git_commit": _git_commit(),
+                "compiled_model": compiled_model,
                 "completed": True,
                 "resumed": resume,
             }
@@ -342,8 +366,10 @@ def run_experiment(
 
         for epoch in range(start_epoch, cfg.training.epochs):
             model.train()
+            _set_dynamics_trainable(model, epoch >= cfg.model.freeze_dynamics_epochs)
             model.set_runtime_context(epoch / max(cfg.training.epochs - 1, 1))
             meter = EpochMeter()
+            should_diagnostics = ((epoch + 1) % max(cfg.training.diagnostics_every, 1) == 0) or (epoch + 1 == cfg.training.epochs)
             for step, batch in enumerate(train_loader):
                 x, y = _to_device(batch, device)
                 optimizer.zero_grad(set_to_none=True)
@@ -369,22 +395,27 @@ def run_experiment(
                 scaler.update()
 
                 spikes = torch.cat([state.spikes for state in states], dim=-1)
-                branch_outputs = torch.cat([state.branch_outputs for state in states], dim=-2)
-                gate_values = _merge_gate_values(states)
-                gate_probs = _merge_state_tensor(states, "gate_probs")
-                gate_variance = _merge_state_tensor(states, "gate_variance")
-                channel_count = _merge_state_tensor(states, "channel_count")
                 metrics = merge_metrics(
                     {"loss": loss.item(), "reg_loss": reg_loss.item(), "distill_loss": float(distill.item())},
                     classification_metrics(logits, y),
                     spike_statistics(spikes),
-                    gate_statistics(gate_values, gate_probs, gate_variance, channel_count),
-                    {
-                        "energy_mj": energy_estimate(spikes, branch_outputs),
-                        "membrane_amplitude_mean": torch.cat([state.soma.abs() for state in states], dim=-1).mean().item(),
-                        "branch_amplitude_mean": branch_outputs.abs().mean().item(),
-                    },
                 )
+                branch_outputs = torch.cat([state.branch_outputs for state in states], dim=-2)
+                batch_energy_mj = energy_estimate(spikes, branch_outputs)
+                metrics = merge_metrics(metrics, {"energy_mj": batch_energy_mj, "energy_proxy_mj": batch_energy_mj})
+                if should_diagnostics:
+                    gate_values = _merge_gate_values(states)
+                    gate_probs = _merge_state_tensor(states, "gate_probs")
+                    gate_variance = _merge_state_tensor(states, "gate_variance")
+                    channel_count = _merge_state_tensor(states, "channel_count")
+                    metrics = merge_metrics(
+                        metrics,
+                        gate_statistics(gate_values, gate_probs, gate_variance, channel_count),
+                        {
+                            "membrane_amplitude_mean": torch.cat([state.soma.abs() for state in states], dim=-1).mean().item(),
+                            "branch_amplitude_mean": branch_outputs.abs().mean().item(),
+                        },
+                    )
                 meter.update(metrics)
 
                 if step % cfg.training.log_every == 0:
@@ -392,14 +423,15 @@ def run_experiment(
 
             scheduler.step()
             train_metrics = meter.summary()
-            train_metrics.update({f"grad_{k}": v for k, v in gradient_norms(model).items()})
+            if should_diagnostics:
+                train_metrics.update({f"grad_{k}": v for k, v in gradient_norms(model).items()})
             should_eval = ((epoch + 1) % max(cfg.training.eval_every, 1) == 0) or (epoch + 1 == cfg.training.epochs)
-            val_metrics = evaluate(model, val_loader, cfg, device) if should_eval else history[-1]["val"].copy() if history else {}
+            val_metrics = evaluate(model, val_loader, cfg, device, detailed=should_diagnostics) if should_eval else history[-1]["val"].copy() if history else {}
             record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
             history.append(record)
             if should_eval and val_metrics["accuracy"] > best_val:
                 best_val = val_metrics["accuracy"]
-                best_test = evaluate(model, test_loader, cfg, device)
+                best_test = evaluate(model, test_loader, cfg, device, detailed=should_diagnostics)
                 torch.save(model.state_dict(), out_dir / "best.pt")
             _save_checkpoint(
                 out_dir,
@@ -415,6 +447,7 @@ def run_experiment(
             "best_test": best_test,
             "parameter_count": parameter_count(model),
             "git_commit": _git_commit(),
+            "compiled_model": compiled_model,
             "completed": True,
             "resumed": resume,
         }
@@ -457,6 +490,7 @@ def run_suite(
     batch_size: int | None = None,
     num_workers: int | None = None,
     eval_every: int | None = None,
+    diagnostics_every: int | None = None,
     save_dir: str = "./runs",
     seed: int | None = None,
     device: str | None = None,
@@ -486,6 +520,7 @@ def run_suite(
             batch_size=batch_size,
             num_workers=num_workers,
             eval_every=eval_every,
+            diagnostics_every=diagnostics_every,
             seed=seed,
             device=device,
             amp=amp,
@@ -509,6 +544,7 @@ def run_suite(
                 batch_size=batch_size,
                 num_workers=num_workers,
                 eval_every=eval_every,
+                diagnostics_every=diagnostics_every,
                 seed=seed,
                 device=device,
                 amp=amp,
@@ -545,6 +581,7 @@ def _variant_run_payload(
     batch_size: int | None,
     num_workers: int | None,
     eval_every: int | None,
+    diagnostics_every: int | None,
     seed: int | None,
     device: str | None,
     amp: bool,
@@ -568,6 +605,8 @@ def _variant_run_payload(
         cfg.dataset.num_workers = num_workers
     if eval_every is not None:
         cfg.training.eval_every = eval_every
+    if diagnostics_every is not None:
+        cfg.training.diagnostics_every = diagnostics_every
     if seed is not None:
         cfg.training.seed = seed
     if device is not None:
@@ -598,6 +637,7 @@ def _run_suite_parallel(
     batch_size: int | None,
     num_workers: int | None,
     eval_every: int | None,
+    diagnostics_every: int | None,
     seed: int | None,
     device: str | None,
     amp: bool,
@@ -624,6 +664,7 @@ def _run_suite_parallel(
             batch_size=batch_size,
             num_workers=num_workers,
             eval_every=eval_every,
+            diagnostics_every=diagnostics_every,
             seed=seed,
             device=assigned_device,
             amp=amp,
@@ -696,6 +737,7 @@ def run_suite_all_datasets(
     batch_size: int | None = None,
     num_workers: int | None = None,
     eval_every: int | None = None,
+    diagnostics_every: int | None = None,
     save_dir: str = "./runs",
     seed: int | None = None,
     device: str | None = None,
@@ -723,6 +765,7 @@ def run_suite_all_datasets(
                 batch_size=batch_size,
                 num_workers=num_workers,
                 eval_every=eval_every,
+                diagnostics_every=diagnostics_every,
                 save_dir=str(root_dir),
                 seed=seed,
                 device=device,

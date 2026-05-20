@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--eval-every", type=int, default=None)
+    parser.add_argument("--diagnostics-every", type=int, default=None)
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--save-dir", default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -122,6 +123,7 @@ def main() -> None:
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 eval_every=args.eval_every,
+                diagnostics_every=args.diagnostics_every,
                 save_dir=args.save_dir or "./runs",
                 seed=args.seed,
                 device=args.device,
@@ -141,6 +143,7 @@ def main() -> None:
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             eval_every=args.eval_every,
+            diagnostics_every=args.diagnostics_every,
             save_dir=args.save_dir or "./runs",
             seed=args.seed,
             device=args.device,
@@ -173,6 +176,8 @@ def main() -> None:
         cfg.training.device = args.device
     if args.eval_every is not None:
         cfg.training.eval_every = args.eval_every
+    if args.diagnostics_every is not None:
+        cfg.training.diagnostics_every = args.diagnostics_every
     if args.amp:
         cfg.training.amp = True
     if args.compile_model:

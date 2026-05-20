@@ -8,7 +8,11 @@ from typing import Callable
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
-from torchvision import datasets, transforms
+try:
+    from torchvision import datasets, transforms
+except ModuleNotFoundError:
+    datasets = None
+    transforms = None
 
 from .config import DatasetConfig
 
@@ -196,6 +200,8 @@ def _flatten_image_sequence(x: torch.Tensor) -> torch.Tensor:
 
 
 def _build_mnist(cfg: DatasetConfig, train: bool, permuted: bool) -> Dataset:
+    if datasets is None or transforms is None:
+        raise ModuleNotFoundError("torchvision is required for MNIST sequence datasets.")
     transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(_flatten_image_sequence)])
     ds = datasets.MNIST(root=cfg.root, train=train, download=True, transform=transform)
     if not permuted:
@@ -228,6 +234,8 @@ def _build_psmnist(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
 
 
 def _build_seq_cifar10(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
+    if datasets is None or transforms is None:
+        raise ModuleNotFoundError("torchvision is required for sequential CIFAR-10.")
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -262,7 +270,7 @@ def _build_shd(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
         def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
             x, y = self.base[index]
             x = torch.as_tensor(x, dtype=torch.float32)
-            x = x.flatten(1)  # SpikingJelly SHD returns (T, C); flatten merges any spatial dims
+            x = x.flatten(1)
             return x, torch.tensor(y)
 
     train_ds, val_ds = _split_dataset(Adapted(train_ds), cfg.val_size)
@@ -336,15 +344,17 @@ def build_dataloaders(cfg: DatasetConfig) -> tuple[DataLoader, DataLoader, DataL
     base_loader_kwargs = {
         "batch_size": cfg.batch_size,
         "num_workers": cfg.num_workers,
-        "pin_memory": torch.cuda.is_available(),
+        "pin_memory": cfg.pin_memory and torch.cuda.is_available(),
     }
     train_loader_kwargs = dict(base_loader_kwargs)
     eval_loader_kwargs = dict(base_loader_kwargs)
     if cfg.num_workers > 0:
-        train_loader_kwargs["persistent_workers"] = True
-        train_loader_kwargs["prefetch_factor"] = 2
-        eval_loader_kwargs["persistent_workers"] = False
-        eval_loader_kwargs["prefetch_factor"] = 2
+        persistent_workers = cfg.persistent_workers
+        train_loader_kwargs["persistent_workers"] = persistent_workers
+        eval_loader_kwargs["persistent_workers"] = persistent_workers
+        if cfg.prefetch_factor > 0:
+            train_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
+            eval_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
     return (
         DataLoader(train_ds, shuffle=True, **train_loader_kwargs),
         DataLoader(val_ds, shuffle=False, **eval_loader_kwargs),

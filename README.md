@@ -22,22 +22,39 @@ The implementation lives under [src/drf_experiment](/home/faiz.ramadhan/projects
 
 ## Environment
 
-The code is intended to run with:
+The repo now uses `uv` as the default environment manager.
 
-- Python: `/home/faiz.ramadhan/.conda/envs/snn/bin/python`
-- PyTorch: already installed in the `snn` environment
-- SpikingJelly: already installed in the `snn` environment
-
-Missing dependencies that were installed into `snn` for this project:
+### Create the environment
 
 ```bash
-/home/faiz.ramadhan/.conda/envs/snn/bin/python -m pip install h5py tables pandas seaborn
+uv sync --python 3.11
 ```
 
-These are needed for:
+This creates a local `.venv` and installs the project plus the runtime dependencies used by the codebase:
 
-- `h5py`, `tables`: SHD loading / manual preprocessing workflows.
-- `pandas`, `seaborn`: experiment summaries and visualization.
+- `torch`, `torchvision`
+- `spikingjelly`
+- `numpy`
+- `matplotlib`
+- `pandas`, `seaborn`
+- `h5py`
+
+### Run commands inside the environment
+
+```bash
+uv run python -m drf_experiment.cli --print-suites
+```
+
+or use the installed script entry point:
+
+```bash
+uv run drf-experiment --print-suites
+```
+
+### Notes
+
+- Python is pinned via `.python-version` to `3.11.14` because that is the safest target for the `torch` + `spikingjelly` stack in this repo.
+- The old Faiz conda environment paths in earlier notes are legacy context only and are no longer required for local setup here.
 
 ## Repo Entry Points
 
@@ -54,7 +71,7 @@ All commands below assume the repository root as the working directory.
 Run a one-off baseline:
 
 ```bash
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
+uv run python -m drf_experiment.cli \
   --variant baseline_drf \
   --dataset sine_frequency \
   --epochs 10 \
@@ -65,13 +82,13 @@ PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.
 List suites:
 
 ```bash
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli --print-suites
+uv run python -m drf_experiment.cli --print-suites
 ```
 
 List all registered variants:
 
 ```bash
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli --print-variants
+uv run python -m drf_experiment.cli --print-variants
 ```
 
 ## Datasets
@@ -87,9 +104,9 @@ These are downloaded automatically through `torchvision` when first used:
 Commands:
 
 ```bash
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli --variant baseline_drf --dataset smnist --epochs 20
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli --variant baseline_drf --dataset psmnist --epochs 20
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli --variant baseline_drf --dataset scifar10 --epochs 30
+uv run python -m drf_experiment.cli --variant baseline_drf --dataset smnist --epochs 20
+uv run python -m drf_experiment.cli --variant baseline_drf --dataset psmnist --epochs 20
+uv run python -m drf_experiment.cli --variant baseline_drf --dataset scifar10 --epochs 30
 ```
 
 Manual source references if you want to mirror or predownload:
@@ -111,13 +128,51 @@ Source references:
 Typical command:
 
 ```bash
-PYTHONPATH=src /home/faiz.ramadhan/.conda/envs/snn/bin/python -m drf_experiment.cli \
+uv run python -m drf_experiment.cli \
   --variant smooth_A3 \
   --dataset shd \
   --epochs 50 \
   --batch-size 32 \
   --data-root ./data
 ```
+
+## Run Outputs And Metrics
+
+Every experiment writes a timestamped run directory under `./runs/` unless you override `--save-dir`.
+
+### Single-run files
+
+- `metrics.json`: the main manifest for the run
+- `last.ckpt`: resumable checkpoint
+- `best.pt`: best model weights by validation accuracy
+- `plots/`: generated diagnostics if history is available
+
+### Suite-level files
+
+- `suite_summary.json`: summary of all variants in the suite
+- `suite_state.json`: progress tracker for resumable suites
+- `plots/`: suite dashboards and training curves
+
+### What the main runtime metrics mean
+
+- `epoch_time_sec`: wall-clock time for one epoch in the current split
+- `train_epoch_time_sec`: the average train epoch time extracted across saved history
+- `accuracy`: fraction of correct class predictions
+- `loss`: cross-entropy classification loss
+- `spike_rate`: average fraction of spike activations that fired
+- `energy_mj`: repo energy proxy computed from spike ops and branch activity, not a hardware power meter
+- `gate_entropy`: how diffuse or decisive the routing distribution is
+- `active_branches_mean`: average number of branches with non-negligible gate activity
+- `branch_utilization_entropy`: how evenly branch contributions are used overall
+- `membrane_amplitude_mean`: mean absolute soma state magnitude
+- `branch_amplitude_mean`: mean absolute branch output magnitude
+- `parameter_count`: number of trainable parameters
+
+### Important interpretation note
+
+- `energy_mj` is currently an internal comparative proxy from `src/drf_experiment/metrics.py`.
+- It is useful for relative comparisons across variants in this repo.
+- It should not be written up as a hardware-validated joule measurement unless separately calibrated.
 
 ### LRA datasets
 
@@ -203,7 +258,7 @@ The code organizes the plan into suites:
 - `spectral_gating_jax_clean`
 - `full_plan`
 
-`full_plan` is the broad experiment matrix. `spectral_gating_plan` is the gating-only matrix from [something/drf_spectral_gating_experiment_plan.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_spectral_gating_experiment_plan.md:1), covering:
+`full_plan` is the broad experiment matrix. `spectral_gating_plan` is the compact PyTorch gating-only matrix from [something/drf_spectral_gating_experiment_plan.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_spectral_gating_experiment_plan.md:1), covering:
 
 - baseline D-RF
 - existing MLP gate
@@ -213,9 +268,9 @@ The code organizes the plan into suites:
 - chunk-wise STFT spectral gate
 - response-energy gate
 - linear spectral gate
-- top-k spectral resonance routing
-- frequency-initialization plus spectral routing
-- stochastic ion-channel-inspired gating variants and controls from [something/drf_stochastic_ion_channel_variants.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_stochastic_ion_channel_variants.md:1)
+- representative top-k spectral resonance routing
+- diverse-frequency initialization plus spectral routing
+- one stochastic ion-channel-inspired gating variant from [something/drf_stochastic_ion_channel_variants.md](/home/faiz.ramadhan/projects/improved_drf/something/drf_stochastic_ion_channel_variants.md:1)
 
 `spectral_gating_jax_clean` is the S5-RF/JAX-friendly subset of `spectral_gating_plan`. It keeps the deterministic spectral routing variants and excludes the stochastic `ion_*` variants.
 

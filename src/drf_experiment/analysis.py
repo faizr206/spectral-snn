@@ -6,7 +6,10 @@ from typing import Any
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+import torch
 
+from .config import DatasetConfig
+from .datasets import apply_dataset_defaults, build_dataloaders
 from .utils import ensure_dir, load_json
 
 
@@ -69,6 +72,93 @@ def _flatten_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "active_blocks_mean": best.get("active_blocks_mean", 0.0),
         "rho_mean": best.get("rho_mean", 0.0),
         "omega_mean": best.get("omega_mean", 0.0),
+    }
+
+
+def _shutdown_dataloader_workers(*loaders) -> None:
+    for loader in loaders:
+        iterator = getattr(loader, "_iterator", None)
+        if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+            iterator._shutdown_workers()
+            loader._iterator = None
+
+
+def _normalized_power_spectrum(x: torch.Tensor, fft_steps: int | None = None) -> torch.Tensor:
+    spec = torch.fft.rfft(x.float(), n=fft_steps, dim=1)
+    power = (spec.real.square() + spec.imag.square()).mean(dim=2)
+    return power / power.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+
+def _spectral_kl(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    p = p.clamp(min=1e-8)
+    q = q.clamp(min=1e-8)
+    return (p * (p.log() - q.log())).sum(dim=-1)
+
+
+def dataset_spectral_diagnostic(
+    cfg: DatasetConfig,
+    *,
+    max_batches: int = 8,
+    chunk_size: int = 64,
+    hop_size: int | None = None,
+) -> dict[str, Any]:
+    apply_dataset_defaults(cfg)
+    train_loader, val_loader, test_loader = build_dataloaders(cfg)
+    class_sums: dict[int, torch.Tensor] = {}
+    class_counts: dict[int, int] = {}
+    mean_chunk_kls: list[torch.Tensor] = []
+    global_spectra: list[torch.Tensor] = []
+    hop = hop_size or chunk_size
+    try:
+        for batch_index, (x, y) in enumerate(train_loader):
+            power = _normalized_power_spectrum(x)
+            global_spectra.append(power)
+            for label in y.unique(sorted=True):
+                idx = int(label.item())
+                mask = y == label
+                total = power[mask].sum(dim=0)
+                class_sums[idx] = total if idx not in class_sums else class_sums[idx] + total
+                class_counts[idx] = class_counts.get(idx, 0) + int(mask.sum().item())
+
+            chunk = min(max(chunk_size, 1), x.shape[1])
+            if chunk < x.shape[1]:
+                chunks = x.unfold(dimension=1, size=chunk, step=max(1, hop))
+                chunk_count = chunks.shape[1]
+                chunked = chunks.permute(0, 1, 3, 2).contiguous().view(-1, chunk, x.shape[2])
+                chunk_power = _normalized_power_spectrum(chunked, fft_steps=x.shape[1]).view(x.shape[0], chunk_count, -1)
+                mean_chunk_kls.append(_spectral_kl(chunk_power, power.unsqueeze(1).expand_as(chunk_power)).reshape(-1))
+
+            if batch_index + 1 >= max_batches:
+                break
+    finally:
+        _shutdown_dataloader_workers(train_loader, val_loader, test_loader)
+
+    if not global_spectra:
+        raise RuntimeError(f"No batches available for dataset diagnostic: {cfg.name}")
+
+    global_power = torch.cat(global_spectra, dim=0).mean(dim=0)
+    class_means = {key: (class_sums[key] / max(class_counts[key], 1)) for key in sorted(class_sums)}
+    pairwise_l1 = []
+    labels = list(class_means.keys())
+    for left_index in range(len(labels)):
+        for right_index in range(left_index + 1, len(labels)):
+            left = class_means[labels[left_index]]
+            right = class_means[labels[right_index]]
+            pairwise_l1.append(torch.abs(left - right).sum().item())
+
+    chunk_kl = torch.cat(mean_chunk_kls).float() if mean_chunk_kls else torch.zeros(1)
+    return {
+        "dataset": cfg.name,
+        "max_batches": max_batches,
+        "chunk_size": chunk_size,
+        "hop_size": hop,
+        "num_classes_seen": len(class_means),
+        "global_power": global_power.tolist(),
+        "class_mean_power": {str(key): value.tolist() for key, value in class_means.items()},
+        "class_pairwise_l1_mean": sum(pairwise_l1) / max(len(pairwise_l1), 1),
+        "class_pairwise_l1_max": max(pairwise_l1) if pairwise_l1 else 0.0,
+        "chunk_kl_mean": chunk_kl.mean().item(),
+        "chunk_kl_max": chunk_kl.max().item(),
     }
 
 

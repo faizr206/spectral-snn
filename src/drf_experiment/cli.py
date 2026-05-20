@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 
-from .analysis import plot_run_diagnostics, plot_suite_dashboard, plot_training_curves
+from .analysis import dataset_spectral_diagnostic, plot_run_diagnostics, plot_suite_dashboard, plot_training_curves
 from .datasets import AVAILABLE_DATASETS
 from .suites import SUITES, baseline_config, variant_config
 from .training import resume_experiment, run_experiment, run_suite, run_suite_all_datasets
+from .utils import save_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plot-root", default=None, help="Root directory containing run folders with metrics.json")
     parser.add_argument("--plot-run", default=None, help="Single run directory containing metrics.json")
     parser.add_argument("--plot-output", default=None, help="Where to save generated plots")
+    parser.add_argument("--dataset-diagnostic", action="store_true", help="Analyze spectral structure of a dataset without training")
+    parser.add_argument("--max-batches", type=int, default=8, help="Maximum number of batches for dataset diagnostics")
+    parser.add_argument("--chunk-size", type=int, default=64, help="Chunk size for time-local spectral diagnostics")
+    parser.add_argument("--hop-size", type=int, default=None, help="Hop size for time-local spectral diagnostics")
+    parser.add_argument("--diagnostic-output", default=None, help="Optional JSON output path for dataset diagnostics")
     return parser.parse_args()
 
 
@@ -80,6 +86,26 @@ def main() -> None:
         output = args.plot_output or f"{args.plot_run.rstrip('/')}/plots"
         plots = plot_run_diagnostics(args.plot_run, output)
         print(json.dumps({"plots": plots}, indent=2))
+        return
+    if args.dataset_diagnostic:
+        cfg = baseline_config()
+        if args.dataset:
+            cfg.dataset.name = args.dataset
+        if args.batch_size is not None:
+            cfg.dataset.batch_size = args.batch_size
+        if args.num_workers is not None:
+            cfg.dataset.num_workers = args.num_workers
+        if args.data_root is not None:
+            cfg.dataset.root = args.data_root
+        result = dataset_spectral_diagnostic(
+            cfg.dataset,
+            max_batches=args.max_batches,
+            chunk_size=args.chunk_size,
+            hop_size=args.hop_size,
+        )
+        if args.diagnostic_output:
+            save_json(args.diagnostic_output, result)
+        print(json.dumps(result, indent=2))
         return
     if args.resume_run:
         result = resume_experiment(args.resume_run, epochs=args.epochs, device=args.device)

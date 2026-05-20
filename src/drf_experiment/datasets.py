@@ -69,6 +69,81 @@ def _build_chirp(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
     return make_split(cfg.train_size), make_split(cfg.val_size), make_split(cfg.test_size)
 
 
+def _build_multi_sine(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
+    templates = [
+        (2.0, 5.0),
+        (2.0, 8.0),
+        (4.0, 8.0),
+        (5.0, 10.0),
+    ]
+
+    def make_split(size: int) -> SequenceTensorDataset:
+        labels = torch.randint(0, cfg.num_classes, (size,))
+        t = torch.linspace(0, 1, cfg.sequence_length)
+        signals = []
+        for label in labels:
+            f1, f2 = templates[label.item() % len(templates)]
+            a1 = 0.8 + 0.3 * torch.rand(1)
+            a2 = 0.4 + 0.2 * torch.rand(1)
+            p1 = torch.rand(1) * 2 * math.pi
+            p2 = torch.rand(1) * 2 * math.pi
+            signal = a1 * torch.sin(2 * math.pi * f1 * t + p1)
+            signal = signal + a2 * torch.sin(2 * math.pi * f2 * t + p2)
+            signal = signal + 0.05 * torch.randn_like(signal)
+            signals.append(signal[:, None])
+        return SequenceTensorDataset(torch.stack(signals), labels)
+
+    return make_split(cfg.train_size), make_split(cfg.val_size), make_split(cfg.test_size)
+
+
+def _build_band_switch(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
+    templates = [
+        (2.0, 8.0),
+        (8.0, 2.0),
+        (3.0, 10.0),
+        (10.0, 3.0),
+    ]
+
+    def make_split(size: int) -> SequenceTensorDataset:
+        labels = torch.randint(0, cfg.num_classes, (size,))
+        t = torch.linspace(0, 1, cfg.sequence_length)
+        mid = cfg.sequence_length // 2
+        signals = []
+        for label in labels:
+            f1, f2 = templates[label.item() % len(templates)]
+            p1 = torch.rand(1) * 2 * math.pi
+            p2 = torch.rand(1) * 2 * math.pi
+            signal = torch.zeros(cfg.sequence_length)
+            signal[:mid] = torch.sin(2 * math.pi * f1 * t[:mid] + p1)
+            signal[mid:] = torch.sin(2 * math.pi * f2 * t[mid:] + p2)
+            signal = signal + 0.05 * torch.randn_like(signal)
+            signals.append(signal[:, None])
+        return SequenceTensorDataset(torch.stack(signals), labels)
+
+    return make_split(cfg.train_size), make_split(cfg.val_size), make_split(cfg.test_size)
+
+
+def _build_spectral_noise(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
+    freqs = torch.linspace(2, 2 * cfg.num_classes, cfg.num_classes)
+
+    def make_split(size: int) -> SequenceTensorDataset:
+        labels = torch.randint(0, cfg.num_classes, (size,))
+        t = torch.linspace(0, 1, cfg.sequence_length)
+        signals = []
+        for label in labels:
+            freq = freqs[label]
+            phase = torch.rand(1) * 2 * math.pi
+            signal = torch.sin(2 * math.pi * freq * t + phase)
+            signal = signal + 0.15 * torch.randn_like(signal)
+            burst_start = torch.randint(0, max(cfg.sequence_length - 8, 1), (1,)).item()
+            burst_end = min(burst_start + 8, cfg.sequence_length)
+            signal[burst_start:burst_end] = signal[burst_start:burst_end] + 0.3 * torch.randn(burst_end - burst_start)
+            signals.append(signal[:, None])
+        return SequenceTensorDataset(torch.stack(signals), labels)
+
+    return make_split(cfg.train_size), make_split(cfg.val_size), make_split(cfg.test_size)
+
+
 def _build_delayed_xor(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
     delay = max(4, cfg.sequence_length // 8)
 
@@ -187,7 +262,7 @@ def _build_shd(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]:
         def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
             x, y = self.base[index]
             x = torch.as_tensor(x, dtype=torch.float32)
-            x = x.flatten(1).transpose(0, 1)
+            x = x.flatten(1)  # SpikingJelly SHD returns (T, C); flatten merges any spatial dims
             return x, torch.tensor(y)
 
     train_ds, val_ds = _split_dataset(Adapted(train_ds), cfg.val_size)
@@ -214,6 +289,9 @@ def _build_tensor_folder(cfg: DatasetConfig) -> tuple[Dataset, Dataset, Dataset]
 BUILDERS: dict[str, Callable[[DatasetConfig], tuple[Dataset, Dataset, Dataset]]] = {
     "sine_frequency": _build_sine_frequency,
     "chirp": _build_chirp,
+    "multi_sine": _build_multi_sine,
+    "band_switch": _build_band_switch,
+    "spectral_noise": _build_spectral_noise,
     "delayed_xor": _build_delayed_xor,
     "adding": _build_adding,
     "burst_suppression": _build_burst_suppression,
@@ -233,6 +311,9 @@ AVAILABLE_DATASETS = tuple(BUILDERS.keys())
 DATASET_DEFAULTS: dict[str, dict[str, int]] = {
     "sine_frequency": {"input_dim": 1, "num_classes": 4, "sequence_length": 128},
     "chirp": {"input_dim": 1, "num_classes": 4, "sequence_length": 128},
+    "multi_sine": {"input_dim": 1, "num_classes": 4, "sequence_length": 128},
+    "band_switch": {"input_dim": 1, "num_classes": 4, "sequence_length": 128},
+    "spectral_noise": {"input_dim": 1, "num_classes": 4, "sequence_length": 128},
     "delayed_xor": {"input_dim": 2, "num_classes": 2, "sequence_length": 128},
     "adding": {"input_dim": 2, "num_classes": 4, "sequence_length": 128},
     "burst_suppression": {"input_dim": 1, "num_classes": 2, "sequence_length": 128},

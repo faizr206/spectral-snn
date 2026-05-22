@@ -31,7 +31,59 @@ concentrated, computation can be safely compressed.
 
 ---
 
-## 2. Hypotheses
+## 2. Empirical Patterns Observed (Hypotheses Derived From These)
+
+The following patterns emerged from preliminary runs. Each one has a corresponding
+hypothesis below. Patterns marked with (*) have not yet been formally tested.
+
+P1 -- Energy floor: D-RF energy is flat across training epochs
+  ep1: 4367 mJ, ep10: 4506, ep30: 4540, ep50: 4552. Only +4% change while
+  training accuracy went from 22% to 100%. The model never learns to be sparse.
+  Implies: energy reduction requires a structural constraint, not just more training.
+  (Hypothesis H7)
+
+P2 -- STFT beats soft SRG on SHD accuracy despite low input stationarity (*)
+  gate_SRG: +1.3% accuracy, -2% energy vs baseline
+  gate_STFT: +5.0% accuracy, -22% energy vs baseline
+  SHD chunk_kl = 0.197 (low). Yet STFT helps more than global SRG.
+  Implies: temporal routing captures onset/offset structure invisible to global FFT.
+  (Hypothesis H8)
+
+P3 -- Smaller model (432K) outperforms all larger models (662K) in both metrics (*)
+  gate_TopK2_SRG_fast: +7.4% accuracy, -57% energy, 432K params
+  All other 662K variants: lower accuracy OR higher energy
+  gate_TopK2_SRG_fast uses freeze_dynamics_epochs=2 and detach_router=True
+  Implies: routing stability during early training is more valuable than capacity.
+  (Hypothesis H5)
+
+P4 -- gate_REG achieves -33% energy with no spectral input (*)
+  Response Energy Gating routes by current branch state magnitude, no FFT at all.
+  Gets 33% of the energy reduction that TopK2_SRG gets. Without any spectral signal.
+  Implies: branch state magnitude is a useful routing proxy. Must be included as a
+  control in H3 to isolate what spectral scoring adds beyond magnitude routing.
+  (Hypothesis H3 -- critical control)
+
+P5 -- MLP gate improves accuracy (+2.2%) but not energy (-1.2%) (*)
+  Learned routers do not learn sparsity on their own. They discover which branches to
+  weigh more but continue to use all of them.
+  Implies: energy reduction requires an explicit sparsity mechanism, not just good routing.
+  (Hypothesis H3 -- confirms top-k is necessary but not sufficient)
+
+P6 -- SRG achieves -57% energy on SHD despite input class_l1 = 0.105 (*)
+  Sine_frequency class_l1 = 1.49; SHD class_l1 = 0.105. 14x difference in input
+  spectral class separation. Yet both get similar energy reductions under SRG.
+  Implies: RF branches create internal spectral structure not present in raw input.
+  (Hypotheses H4 and H9)
+
+P7 -- Val-test accuracy gap: 80% val, 64% test on SHD at 50 epochs (*)
+  Val set is drawn from training speakers; test set uses different speakers.
+  Implies: routing patterns may differ on OOD speakers. Gate entropy may be a
+  free OOD indicator requiring no extra computation.
+  (Hypothesis H6)
+
+---
+
+## 3. Hypotheses
 
 H1 -- Energy reduction (primary)
 SRG with hard top-k achieves >= 40% energy reduction at matched classification accuracy
@@ -55,6 +107,66 @@ SRG generalizes beyond spectrally structured inputs. On SHD, input frames have l
 spectral class separation (class_pairwise_l1 = 0.105 vs 1.49 for synthetic data), yet
 SRG achieves 57% energy reduction. The mechanism works through internal branch
 dynamics, not raw input frequency discrimination.
+
+H5 -- Routing stability through dynamics freezing
+Freezing the RF branch parameters (omega_i, rho_i) for the first N epochs of training
+prevents the spectral router from disrupting early branch identity, leading to better
+final accuracy and energy efficiency with fewer total parameters.
+Evidence: gate_TopK2_SRG_fast uses freeze_dynamics_epochs=2, detach_router=True, and
+outperforms all 662K-parameter variants with only 432K parameters. Ablation: compare
+TopK2_SRG with freeze_dynamics_epochs in {0, 2, 5, 10}. Prediction: performance peaks
+at some nonzero freeze duration, drops at zero (no freeze) and high values (too rigid).
+
+H6 -- Gate entropy as an OOD indicator
+SRG gate entropy is measurably higher on out-of-distribution inputs than in-distribution
+inputs, without any additional parameters or training.
+Evidence: SHD shows val-test gap of ~16 points (80% vs 64%) due to speaker distribution
+shift. Prediction: gate_entropy on OOD test speakers is higher than on val speakers.
+Empirical test: run inference on val and test sets separately; compare gate_entropy
+distributions. A statistically significant shift confirms this hypothesis post-hoc on
+existing checkpoints, with no new training needed.
+
+H7 -- D-RF does not learn sparsity; SRG imposes it structurally
+Baseline D-RF does not become sparser as training progresses. Energy consumption is
+approximately constant across training epochs regardless of accuracy gain.
+Evidence: epoch 1 energy = 4367 mJ, epoch 50 energy = 4552 mJ (only +4% increase),
+while accuracy went from 22% to 100% on the training set. SRG's energy reduction is
+architectural, not learned. A model trained without SRG cannot achieve the same energy
+reduction through longer training alone.
+Empirical claim: plot energy vs epoch for baseline_drf and gate_TopK2_SRG on the same
+axes. Baseline energy is flat; SRG energy is structurally constrained from epoch 1.
+
+H8 -- Temporal routing benefits speech even when global spectrum appears stationary
+STFT-based routing (gate_STFT) improves accuracy on SHD beyond soft global SRG despite
+SHD having low stationarity score (chunk_kl = 0.197). The reason: speech onset/offset
+asymmetry means early and late temporal segments activate different branch subsets, even
+when the global time-averaged spectrum looks similar across chunks.
+Evidence: gate_STFT achieves +5.0% accuracy and -22% energy on SHD vs baseline,
+compared to gate_SRG at +1.3% accuracy and -2% energy.
+Prediction: per-chunk branch activation patterns in STFT-gated models show temporal
+structure -- early chunks (onset) activate different branches from late chunks (sustained).
+This temporal activation pattern does not appear in global SRG.
+
+H9 -- RF branches amplify spectral class structure beyond what is present in raw input
+The spectral class separation of branch activations (measured after the D-RF layer) is
+substantially higher than the spectral class separation of the raw input frames.
+This explains H4: even when the input has low spectral class separation (SHD: 0.105),
+the RF branches create internal spectral representations through resonant dynamics that
+SRG can route on effectively.
+Empirical test: measure class_pairwise_l1 on (a) raw SHD input frames and (b) branch
+state activations after the first D-RF layer in a trained baseline model.
+Prediction: branch activation class_l1 > input frame class_l1 on SHD. This would
+explain H4 mechanistically rather than leaving it as an empirical observation.
+
+H10 -- Optimal k is predictable from dataset spectral class separation
+The accuracy-energy tradeoff optimum (best accuracy at a given energy budget) scales
+with the dataset's class spectral separation. Higher separation allows lower k; lower
+separation requires more branches active to preserve accuracy.
+Evidence: on sine_frequency (class_l1 = 1.49), k=1 may suffice. On SHD (class_l1 = 0.105),
+k=2 or higher may be needed. If confirmed across datasets, class_l1 (measurable without
+any training) predicts the right k before running any experiments.
+Empirical test: for each dataset, sweep k = {1, 2, 4, 8, all} and plot accuracy-energy
+Pareto frontier. Regress optimal k against class_l1. Prediction: Spearman rho >= 0.7.
 
 PRISM claim -- Spectral concentration as redundancy diagnostic
 The gate entropy of SRG at inference is predicted by the eigenspectrum entropy of the

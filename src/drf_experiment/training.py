@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import random
 import subprocess
 import time
 import traceback
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -33,7 +36,7 @@ def _configure_runtime(device: torch.device) -> None:
         return
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
+    # deterministic=True is set by set_seed(); benchmark stays False for reproducibility
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision("high")
 
@@ -166,7 +169,7 @@ def _checkpoint_payload(
     best_test: dict[str, Any],
     history: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "config": cfg.to_dict(),
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
@@ -176,7 +179,13 @@ def _checkpoint_payload(
         "best_val": best_val,
         "best_test": best_test,
         "history": history,
+        "torch_rng_state": torch.get_rng_state(),
+        "python_rng_state": random.getstate(),
+        "numpy_rng_state": np.random.get_state(),
     }
+    if torch.cuda.is_available():
+        payload["cuda_rng_state"] = torch.cuda.get_rng_state_all()
+    return payload
 
 
 def _save_checkpoint(run_dir: Path, payload: dict[str, Any]) -> None:
@@ -298,14 +307,18 @@ def run_experiment(
     if cfg.model.backend != "torch_drf":
         raise ValueError(f"Unsupported model backend: {cfg.model.backend}")
 
-    set_seed(cfg.training.seed)
+    # Data seed is fixed at 0 across all experiments so different training seeds
+    # reflect model variance, not dataset variance. Training seed controls
+    # model init, optimizer state, and batch order.
+    set_seed(0)
     device = resolve_device(cfg.training.device)
     _configure_runtime(device)
     out_dir = ensure_dir(run_dir) if run_dir is not None else ensure_dir(Path(cfg.training.save_dir) / f"{cfg.name}-{now_timestamp()}")
     apply_dataset_defaults(cfg.dataset)
     cfg.model.d_input = cfg.dataset.input_dim
     cfg.model.d_output = cfg.dataset.num_classes
-    train_loader, val_loader, test_loader = build_dataloaders(cfg.dataset)
+    train_loader, val_loader, test_loader = build_dataloaders(cfg.dataset, seed=cfg.training.seed)
+    set_seed(cfg.training.seed)
     try:
         model = DRFNet(cfg.model).to(device)
         if cfg.model.frequency_init != "random":
@@ -346,6 +359,12 @@ def run_experiment(
             best_val = float(checkpoint["best_val"])
             best_test = checkpoint["best_test"]
             history = checkpoint["history"]
+            if "torch_rng_state" in checkpoint:
+                torch.set_rng_state(checkpoint["torch_rng_state"])
+                random.setstate(checkpoint["python_rng_state"])
+                np.random.set_state(checkpoint["numpy_rng_state"])
+                if torch.cuda.is_available() and "cuda_rng_state" in checkpoint:
+                    torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
 
         if start_epoch >= cfg.training.epochs:
             manifest = {

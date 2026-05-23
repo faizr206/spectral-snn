@@ -206,16 +206,18 @@ VARIANT_UPDATES = {
 
 
 SUITES = {
-    # H3 isolation: all variants use top_k=2 — only scoring function differs
-    # Run this first. If gate_TopK2_SRG does not Pareto-dominate all controls,
-    # the spectral routing claim does not hold.
+    # H3 isolation: all variants use top_k=2 and identical model config.
+    # Only the scoring function differs: Random, Magnitude, MLP, Spectral.
+    # gate_TopK2_SRG_fast is NOT included — it changes 6+ hyperparameters
+    # simultaneously and cannot isolate the scoring function contribution.
+    # Run this before any other suite. If gate_TopK2_SRG does not
+    # Pareto-dominate all controls, the spectral routing claim does not hold.
     "h3_isolation": [
         "baseline_drf",
         "gate_TopK2_SRG",
         "gate_TopK2_Random",
         "gate_TopK2_Magnitude",
         "gate_TopK2_MLP",
-        "gate_TopK2_SRG_fast",
     ],
     # Gate 1 verification: baseline + SRG at full convergence
     "gate1_verification": [

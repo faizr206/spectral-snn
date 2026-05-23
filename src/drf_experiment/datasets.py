@@ -337,7 +337,7 @@ DATASET_DEFAULTS: dict[str, dict[str, int]] = {
 }
 
 
-def build_dataloaders(cfg: DatasetConfig) -> tuple[DataLoader, DataLoader, DataLoader]:
+def build_dataloaders(cfg: DatasetConfig, seed: int = 0) -> tuple[DataLoader, DataLoader, DataLoader]:
     if cfg.name not in BUILDERS:
         raise KeyError(f"Unsupported dataset: {cfg.name}")
     train_ds, val_ds, test_ds = BUILDERS[cfg.name](cfg)
@@ -355,8 +355,24 @@ def build_dataloaders(cfg: DatasetConfig) -> tuple[DataLoader, DataLoader, DataL
         if cfg.prefetch_factor > 0:
             train_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
             eval_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
+        # Seed workers so augmentation (e.g. SHD random shift) is reproducible
+        def make_worker_init(base_seed: int):
+            def worker_init_fn(worker_id: int) -> None:
+                import random as _random
+                import numpy as _np
+                w_seed = base_seed + worker_id
+                _random.seed(w_seed)
+                _np.random.seed(w_seed)
+                torch.manual_seed(w_seed)
+            return worker_init_fn
+        train_loader_kwargs["worker_init_fn"] = make_worker_init(seed)
+        eval_loader_kwargs["worker_init_fn"] = make_worker_init(seed + 10000)
+    # drop_last=True ensures all batches are the same size so EpochMeter
+    # mean energy is not biased by a smaller tail batch
     return (
-        DataLoader(train_ds, shuffle=True, **train_loader_kwargs),
+        DataLoader(train_ds, shuffle=True, drop_last=True,
+                   generator=torch.Generator().manual_seed(seed),
+                   **train_loader_kwargs),
         DataLoader(val_ds, shuffle=False, **eval_loader_kwargs),
         DataLoader(test_ds, shuffle=False, **eval_loader_kwargs),
     )

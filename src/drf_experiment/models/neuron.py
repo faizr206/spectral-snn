@@ -479,8 +479,13 @@ class DendriticRFBlock(nn.Module):
             gate = gate.unsqueeze(1).expand(-1, x.shape[1], -1)
             return gate, gate, None, None
         if self.cfg.gating.mode == "random":
-            # H3 control: random uniform scores, same top-k as SRG — isolates spectral scoring from sparsity
-            scores = torch.rand(x.shape[0], self.cfg.num_branches, device=x.device, dtype=x.dtype)
+            # H3 control: random uniform scores, same top-k as SRG — isolates spectral scoring from sparsity.
+            # During eval, use a fixed generator so test accuracy is deterministic across runs.
+            if self.training:
+                scores = torch.rand(x.shape[0], self.cfg.num_branches, device=x.device, dtype=x.dtype)
+            else:
+                gen = torch.Generator(device=x.device).manual_seed(42)
+                scores = torch.rand(x.shape[0], self.cfg.num_branches, device=x.device, dtype=x.dtype, generator=gen)
             gate = self._apply_gate_constraints(scores)
             gate = gate.unsqueeze(1).expand(-1, x.shape[1], -1)
             return gate, gate, None, None

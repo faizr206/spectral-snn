@@ -111,7 +111,7 @@ def dataset_spectral_diagnostic(
     hop_size: int | None = None,
 ) -> dict[str, Any]:
     apply_dataset_defaults(cfg)
-    train_loader, val_loader, test_loader = build_dataloaders(cfg)
+    train_loader, val_loader, test_loader = build_dataloaders(cfg, seed=0)
     class_sums: dict[int, torch.Tensor] = {}
     class_counts: dict[int, int] = {}
     mean_chunk_kls: list[torch.Tensor] = []

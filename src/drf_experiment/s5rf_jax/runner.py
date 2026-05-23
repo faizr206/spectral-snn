@@ -161,7 +161,7 @@ def run_s5rf_experiment(cfg: ExperimentConfig, *, run_dir: str | Path | None = N
     _profile_for_dataset(cfg)
 
     out_dir = ensure_dir(run_dir) if run_dir is not None else ensure_dir(Path(cfg.training.save_dir) / f"{cfg.name}-{now_timestamp()}")
-    train_loader, val_loader, test_loader = build_dataloaders(cfg.dataset)
+    train_loader, val_loader, test_loader = build_dataloaders(cfg.dataset, seed=cfg.training.seed)
     frequency_centers = _frequency_centers(jnp, cfg, train_loader)
     model = _build_model(eqx, jax, cfg, frequency_centers)
     optim, opt_state = _optimizer(eqx, jax, optax, model, cfg, len(train_loader))

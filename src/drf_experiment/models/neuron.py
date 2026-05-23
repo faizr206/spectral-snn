@@ -478,6 +478,12 @@ class DendriticRFBlock(nn.Module):
             gate = self._apply_gate_constraints(self.linear_spectral_gate(descriptor))
             gate = gate.unsqueeze(1).expand(-1, x.shape[1], -1)
             return gate, gate, None, None
+        if self.cfg.gating.mode == "random":
+            # H3 control: random uniform scores, same top-k as SRG — isolates spectral scoring from sparsity
+            scores = torch.rand(x.shape[0], self.cfg.num_branches, device=x.device, dtype=x.dtype)
+            gate = self._apply_gate_constraints(scores)
+            gate = gate.unsqueeze(1).expand(-1, x.shape[1], -1)
+            return gate, gate, None, None
         raise ValueError(f"Unsupported gating mode: {self.cfg.gating.mode}")
 
     def _threshold_noise(self, gate_probs: torch.Tensor | None, gate_variance: torch.Tensor | None, hidden_dim: int) -> torch.Tensor | None:

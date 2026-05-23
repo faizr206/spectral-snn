@@ -46,6 +46,10 @@ VARIANT_UPDATES = {
     "gate_freq_C1_SRG": {"model": {"frequency_init": "log", "gating": {"mode": "spectral_response", "temperature": 0.5, "spectrum_norm": "sum"}}},
     "gate_freq_C2_SRG": {"model": {"frequency_init": "quantile", "gating": {"mode": "spectral_response", "temperature": 0.5, "spectrum_norm": "sum"}}},
     "gate_freq_C4_SRG": {"model": {"frequency_init": "diverse", "gating": {"mode": "spectral_response", "temperature": 0.5, "spectrum_norm": "sum"}, "regularization": {"diversity_weight": 1e-3}}},
+    # H3 isolation controls — all use top_k=2, differ only in scoring function
+    "gate_TopK2_Random": {"model": {"gating": {"mode": "random", "temperature": 0.5, "top_k": 2}}},
+    "gate_TopK2_Magnitude": {"model": {"gating": {"mode": "response_energy", "temperature": 0.5, "top_k": 2}}},
+    "gate_TopK2_MLP": {"model": {"gating": {"mode": "sequence", "hidden_dim": 64, "top_k": 2, "l1_penalty": 0.0}}},
     "ion_SCG": {
         "model": {
             "gating": {"mode": "spectral_response", "temperature": 1.0, "spectrum_norm": "sum"},
@@ -202,6 +206,25 @@ VARIANT_UPDATES = {
 
 
 SUITES = {
+    # H3 isolation: all variants use top_k=2 — only scoring function differs
+    # Run this first. If gate_TopK2_SRG does not Pareto-dominate all controls,
+    # the spectral routing claim does not hold.
+    "h3_isolation": [
+        "baseline_drf",
+        "gate_TopK2_SRG",
+        "gate_TopK2_Random",
+        "gate_TopK2_Magnitude",
+        "gate_TopK2_MLP",
+        "gate_TopK2_SRG_fast",
+    ],
+    # Gate 1 verification: baseline + SRG at full convergence
+    "gate1_verification": [
+        "baseline_drf",
+        "gate_D1",
+        "gate_SRG",
+        "gate_TopK2_SRG",
+        "gate_TopK2_SRG_fast",
+    ],
     "synthetic_debug": ["baseline_drf", "smooth_A1", "smooth_A3", "freq_C2", "gate_D1", "threshold_E1", "norm_F1"],
     "paper_synthetic_mechanism": [
         "baseline_drf",

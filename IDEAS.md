@@ -1,11 +1,22 @@
 # PRISM Part 1 — Idea Board
 
-**Last updated:** 2026-05-17  
+**Last updated:** 2026-05-23  
 **Project:** Spectral Resonance Gating (SRG) in D-RF SNNs → ICLR 2027
 
 ---
 
 ## Active Threads (Currently Developing)
+
+### [A4] SRG as GPU-Efficient SNN Training — NEW, PURSUE (H11)
+The O(T) sequential bottleneck is why SNNs are not widely used. baseline_drf on S-CIFAR10
+T=1024: 104 min/epoch. gate_TopK2_SRG_fast (sparse_execution=True, k=2 of 8 branches):
+predicted ~26 min/epoch (4x speedup from 75% branch reduction). If confirmed, SRG provides
+real wall-clock speedup on standard GPU hardware -- no neuromorphic chip needed. This directly
+addresses the #1 practical barrier to SNN adoption.
+- **Gate:** gate_TopK2_SRG_fast must be ≥2x faster than baseline on S-CIFAR10 epoch_time_sec
+- **Experiment:** H11 timing test running NOW on GPU 3 (3 epochs each, compare times)
+- **Impact:** Reframes energy savings as compute reduction — measurable on hardware you have
+- **Paper angle:** "SRG makes SNNs practical on standard GPUs" — stronger than "theoretical mJ"
 
 ### [A1] Frequency-Niche Continual Learning — CONDITIONAL PURSUE
 SRG-gated D-RF SNNs segregate sequential tasks by spectral content without task labels. Niche overlap ⟨|H_i(f)|², |H_j(f)|²⟩ predicts forgetting before any training. Scoop risk: 8%.

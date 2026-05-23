@@ -168,6 +168,19 @@ any training) predicts the right k before running any experiments.
 Empirical test: for each dataset, sweep k = {1, 2, 4, 8, all} and plot accuracy-energy
 Pareto frontier. Regress optimal k against class_l1. Prediction: Spearman rho >= 0.7.
 
+H11 -- SRG with sparse execution provides real wall-clock speedup on standard GPU hardware
+The 104 min/epoch observed on S-CIFAR10 (T=1024) with baseline_drf (8 branches always active)
+exposes the core reason SNNs are not widely adopted: O(T) sequential processing cannot leverage
+GPU parallelism. gate_TopK2_SRG_fast with sparse_execution=True activates only 2 of 8 branches,
+reducing branch-level compute by 75%. If this translates to actual wall-clock speedup (not just
+a theoretical energy proxy), it makes SNNs with long sequences practical on standard hardware.
+Evidence: baseline_drf S-CIFAR10 T=1024: 104 min/epoch (measured). gate_TopK2_SRG_fast: unmeasured.
+Empirical test: run 3 epochs each of baseline_drf and gate_TopK2_SRG_fast on S-CIFAR10.
+Compare epoch_time_sec only. Prediction: gate_TopK2_SRG_fast is 2-4x faster.
+If confirmed: paper gains a hardware-independent claim that directly addresses the #1 barrier
+to SNN adoption. Energy savings become a corollary of compute reduction, not a proxy metric.
+This is the strongest possible argument for SRG in practice.
+
 PRISM claim -- Spectral concentration as redundancy diagnostic
 The gate entropy of SRG at inference is predicted by the eigenspectrum entropy of the
 gradient covariance during training. This connection, if empirically confirmed (Spearman

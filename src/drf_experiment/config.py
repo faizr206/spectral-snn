@@ -118,28 +118,9 @@ class QuantizationConfig:
 
 
 @dataclass
-class S5RFConfig:
-    profile: str = "auto"
-    num_neurons: int = 128
-    num_blocks: int = 8
-    num_layers: int = 2
-    eta_min: float = 0.001
-    eta_max: float = 0.1
-    activation: str = "cartesian_spike"
-    discretization: str = "zoh"
-    keep_imag: bool = True
-    apply_skip: bool = True
-    dense_dropout: bool = True
-    dropout: float = 0.15
-    lr_ssm: float = 0.002
-    apply_cutmix: bool = False
-    apply_random_shift: bool = False
-    use_dataset_profile: bool = True
-
-
-@dataclass
 class ModelConfig:
     backend: str = "torch_drf"
+    neuron_type: str = "drf"
     d_model: int = 128
     d_input: int = 1
     d_output: int = 4
@@ -174,7 +155,6 @@ class ModelConfig:
     regularization: RegularizationConfig = field(default_factory=RegularizationConfig)
     distillation: DistillationConfig = field(default_factory=DistillationConfig)
     quantization: QuantizationConfig = field(default_factory=QuantizationConfig)
-    s5rf: S5RFConfig = field(default_factory=S5RFConfig)
 
 
 @dataclass

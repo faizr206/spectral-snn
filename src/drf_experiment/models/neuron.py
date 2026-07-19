@@ -524,6 +524,9 @@ class DendriticRFBlock(nn.Module):
         # branch_input: [B, T, H, N]
         bsz, steps, hidden, branches = branch_input.shape
         rho, gamma, _, _, omega = self._dynamics_terms(branch_indices)
+        rho = rho.to(device=branch_input.device, dtype=torch.float32)
+        gamma = gamma.to(device=branch_input.device, dtype=torch.float32)
+        omega = omega.to(device=branch_input.device, dtype=torch.float32)
         coeff = rho * torch.exp(1j * omega)
         powers = torch.arange(steps, device=branch_input.device, dtype=torch.float32)
         kernel = gamma.unsqueeze(-1) * coeff.pow(powers[:, None, None]).permute(1, 2, 0)  # [H, N, T]
@@ -535,7 +538,7 @@ class DendriticRFBlock(nn.Module):
             dim=-1,
         )[..., :steps]
         y = y.view(bsz, hidden, branches, steps).permute(0, 3, 1, 2)
-        return y.real, y.imag
+        return y.real.to(branch_input.dtype), y.imag.to(branch_input.dtype)
 
     def _sequential_update(self, branch_input: torch.Tensor, branch_indices: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         bsz, steps, hidden, branches = branch_input.shape
@@ -571,7 +574,7 @@ class DendriticRFBlock(nn.Module):
             reset_trace = reset_trace * self.cfg.smooth_reset.lambda_r + reset_spike.unsqueeze(-1)
             out_r.append(real)
             out_i.append(imag)
-        return torch.stack(out_r, dim=1), torch.stack(out_i, dim=1)
+        return torch.stack(out_r, dim=1).to(branch_input.dtype), torch.stack(out_i, dim=1).to(branch_input.dtype)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, LayerState]:
         self.runtime_batch = x.shape[0]
@@ -701,5 +704,84 @@ class DendriticRFBlock(nn.Module):
         if not self.cfg.quantization.enabled:
             return
         for name in ["branch_weight", "gamma_hat", "rho_hat", "omega_hat", "reset_beta"]:
+            param = getattr(self, name)
+            param.data.copy_(quantize_tensor(param.data, self.cfg.quantization.bits, self.cfg.quantization.power_of_two))
+
+
+class LIFBlock(nn.Module):
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.cfg = cfg
+        h = cfg.d_model
+        self.input_proj = nn.Linear(h, h)
+        self.output_proj = nn.Linear(h, h)
+        self.dropout = nn.Dropout(cfg.dropout)
+        self.leak_hat = nn.Parameter(torch.full((h,), 2.2))
+        self.threshold = MultiTimescaleThreshold(cfg)
+        self.spike_op = spike_fn(cfg.surrogate)
+        self.runtime_progress = 1.0
+
+    def initialize_frequencies(self, bins: torch.Tensor | None, power: torch.Tensor | None) -> None:
+        return
+
+    def set_runtime_context(self, progress: float) -> None:
+        self.runtime_progress = float(progress)
+
+    def leak(self) -> torch.Tensor:
+        return torch.sigmoid(self.leak_hat) * (1 - self.cfg.stable_eps)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, LayerState]:
+        drive = self.input_proj(x)
+        mem = torch.zeros(x.shape[0], x.shape[2], device=x.device, dtype=x.dtype)
+        leak = self.leak().to(device=x.device, dtype=x.dtype)
+        spikes = []
+        soma_values = []
+        thresholds = []
+        for t in range(x.shape[1]):
+            mem = leak * mem + drive[:, t]
+            threshold = torch.full_like(mem, self.cfg.threshold.base)
+            spike = self.spike_op(mem - threshold, self.cfg.surrogate_scale)
+            mem = mem * (1.0 - spike)
+            spikes.append(spike)
+            soma_values.append(mem)
+            thresholds.append(threshold)
+        soma = torch.stack(soma_values, dim=1)
+        spike_tensor = torch.stack(spikes, dim=1)
+        threshold_tensor = torch.stack(thresholds, dim=1)
+        out = self.output_proj(self.dropout(spike_tensor)) + soma + x
+        branch_real = soma.unsqueeze(-1)
+        branch_imag = torch.zeros_like(branch_real)
+        state = LayerState(
+            spikes=spike_tensor,
+            soma=soma,
+            branch_real=branch_real,
+            branch_imag=branch_imag,
+            threshold_trace=threshold_tensor,
+            reset_trace=torch.zeros_like(spike_tensor),
+            branch_outputs=branch_real,
+            gates=None,
+        )
+        return out, state
+
+    def rho(self) -> torch.Tensor:
+        return self.leak().unsqueeze(-1)
+
+    def omega(self) -> torch.Tensor:
+        return torch.zeros(self.cfg.d_model, 1, device=self.leak_hat.device, dtype=self.leak_hat.dtype)
+
+    def regularization_loss(self, state: LayerState) -> dict[str, torch.Tensor]:
+        losses: dict[str, torch.Tensor] = {}
+        if self.cfg.regularization.energy_weight > 0:
+            rate = state.spikes.mean()
+            if self.cfg.regularization.target_spike_rate is not None:
+                losses["energy"] = self.cfg.regularization.energy_weight * (rate - self.cfg.regularization.target_spike_rate).square()
+            else:
+                losses["energy"] = self.cfg.regularization.energy_weight * rate
+        return losses
+
+    def maybe_quantize(self) -> None:
+        if not self.cfg.quantization.enabled:
+            return
+        for name in ["leak_hat"]:
             param = getattr(self, name)
             param.data.copy_(quantize_tensor(param.data, self.cfg.quantization.bits, self.cfg.quantization.power_of_two))

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from ..config import ModelConfig
-from .neuron import DendriticRFBlock, LayerState
+from .neuron import DendriticRFBlock, LayerState, LIFBlock
 
 
 class DRFNet(nn.Module):
@@ -12,14 +12,15 @@ class DRFNet(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.encoder = nn.Linear(cfg.d_input, cfg.d_model)
-        self.layers = nn.ModuleList([DendriticRFBlock(cfg) for _ in range(cfg.num_layers)])
+        block_cls = LIFBlock if cfg.neuron_type == "lif" else DendriticRFBlock
+        self.layers = nn.ModuleList([block_cls(cfg) for _ in range(cfg.num_layers)])
         self.hybrid = self._build_hybrid()
         self.decoder = nn.Linear(cfg.d_model, cfg.d_output)
 
     def _build_hybrid(self) -> nn.Module:
         if self.cfg.hybrid_head == "dw_conv":
             return nn.Conv1d(self.cfg.d_model, self.cfg.d_model, kernel_size=3, padding=1, groups=self.cfg.d_model)
-        if self.cfg.hybrid_head == "ssm_mlp":
+        if self.cfg.hybrid_head == "mlp":
             return nn.Sequential(
                 nn.Linear(self.cfg.d_model, self.cfg.hybrid_width),
                 nn.GELU(),

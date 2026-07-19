@@ -1,0 +1,26 @@
+datasets:
+  - smnist
+  - psmnist
+  - shd
+
+baseline_neuron_types:
+  - drf
+  - brf
+  - lif
+
+variants:
+  - gate_TopK2_SRG_fast
+  - gate_STFT
+  - ion_MCG
+  - gate_D1
+
+epochs: 10
+batch_size: 200
+num_workers: 4
+eval_every: 1
+diagnostics_every: 1
+save_dir: ./runs
+seed: 42
+device: cuda
+amp: true
+compile_model: false

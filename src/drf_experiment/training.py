@@ -47,7 +47,7 @@ def _optimizer(model: DRFNet, cfg: ExperimentConfig) -> torch.optim.Optimizer:
     dynamics = []
     core = []
     for name, param in model.named_parameters():
-        if any(token in name for token in ["rho_hat", "omega_hat", "gamma_hat", "reset_beta", "threshold"]):
+        if any(token in name for token in ["rho_hat", "omega_hat", "gamma_hat", "reset_beta", "threshold", "leak_hat"]):
             dynamics.append(param)
         else:
             core.append(param)
@@ -58,7 +58,7 @@ def _optimizer(model: DRFNet, cfg: ExperimentConfig) -> torch.optim.Optimizer:
 
 
 def _is_dynamics_parameter(name: str) -> bool:
-    return any(token in name for token in ["rho_hat", "omega_hat", "gamma_hat"])
+    return any(token in name for token in ["rho_hat", "omega_hat", "gamma_hat", "leak_hat"])
 
 
 def _set_dynamics_trainable(model: nn.Module, trainable: bool) -> None:
@@ -132,8 +132,17 @@ def evaluate(model: DRFNet, loader, cfg: ExperimentConfig, device: torch.device,
             )
             if detailed:
                 branch_outputs = torch.cat([state.branch_outputs for state in states], dim=-2)
-                rho = torch.cat([layer.rho().flatten() for layer in base_model.layers])
-                omega = torch.cat([layer.omega().flatten() for layer in base_model.layers])
+                rho = torch.cat([layer.rho().flatten() for layer in base_model.layers if hasattr(layer, "rho")])
+                omega = torch.cat([layer.omega().flatten() for layer in base_model.layers if hasattr(layer, "omega")])
+                branch_weights = [
+                    layer.branch_weight.flatten()
+                    for layer in base_model.layers
+                    if hasattr(layer, "branch_weight")
+                ]
+                if branch_weights:
+                    branch_metrics = branch_statistics(branch_outputs, torch.cat(branch_weights))
+                else:
+                    branch_metrics = {}
                 gate_values = _merge_gate_values(states)
                 gate_probs = _merge_state_tensor(states, "gate_probs")
                 gate_variance = _merge_state_tensor(states, "gate_variance")
@@ -141,7 +150,7 @@ def evaluate(model: DRFNet, loader, cfg: ExperimentConfig, device: torch.device,
                 energy_mj = energy_estimate(spikes, branch_outputs)
                 stats = merge_metrics(
                     stats,
-                    branch_statistics(branch_outputs, torch.cat([layer.branch_weight.flatten() for layer in base_model.layers])),
+                    branch_metrics,
                     parameter_distributions(rho, omega),
                     gate_statistics(gate_values, gate_probs, gate_variance, channel_count),
                     {
@@ -291,10 +300,6 @@ def run_experiment(
     run_dir: str | Path | None = None,
     resume: bool = False,
 ) -> dict[str, Any]:
-    if cfg.model.backend == "jax_s5rf":
-        from .s5rf_jax import run_s5rf_experiment
-
-        return run_s5rf_experiment(cfg, run_dir=run_dir, resume=resume)
     if cfg.model.backend != "torch_drf":
         raise ValueError(f"Unsupported model backend: {cfg.model.backend}")
 
@@ -496,7 +501,6 @@ def run_suite(
     device: str | None = None,
     amp: bool = False,
     compile_model: bool = False,
-    model_backend: str | None = None,
     resume_suite: str | Path | None = None,
     parallelism: int = 1,
     devices: list[str] | None = None,
@@ -525,7 +529,6 @@ def run_suite(
             device=device,
             amp=amp,
             compile_model=compile_model,
-            model_backend=model_backend,
             parallelism=parallelism,
             devices=devices,
         )
@@ -549,7 +552,6 @@ def run_suite(
                 device=device,
                 amp=amp,
                 compile_model=compile_model,
-                model_backend=model_backend,
                 suite_dir=suite_dir,
                 variant_state=variant_state,
             )
@@ -586,7 +588,6 @@ def _variant_run_payload(
     device: str | None,
     amp: bool,
     compile_model: bool,
-    model_backend: str | None,
     suite_dir: Path,
     variant_state: dict[str, Any],
 ) -> tuple[ExperimentConfig, Path, bool]:
@@ -615,8 +616,6 @@ def _variant_run_payload(
         cfg.training.amp = True
     if compile_model:
         cfg.training.compile_model = True
-    if model_backend is not None:
-        cfg.model.backend = model_backend
     run_path = run_path if run_path is not None else suite_dir / f"{cfg.name}-{now_timestamp()}"
     cfg.training.save_dir = str(suite_dir)
     return cfg, run_path, run_path.joinpath("last.ckpt").exists()
@@ -642,7 +641,6 @@ def _run_suite_parallel(
     device: str | None,
     amp: bool,
     compile_model: bool,
-    model_backend: str | None,
     parallelism: int,
     devices: list[str] | None,
 ) -> dict[str, Any]:
@@ -669,7 +667,6 @@ def _run_suite_parallel(
             device=assigned_device,
             amp=amp,
             compile_model=compile_model,
-            model_backend=model_backend,
             suite_dir=suite_dir,
             variant_state=variant_state,
         )
@@ -743,7 +740,6 @@ def run_suite_all_datasets(
     device: str | None = None,
     amp: bool = False,
     compile_model: bool = False,
-    model_backend: str | None = None,
     parallelism: int = 1,
     devices: list[str] | None = None,
     resume_root: str | Path | None = None,
@@ -771,7 +767,6 @@ def run_suite_all_datasets(
                 device=device,
                 amp=amp,
                 compile_model=compile_model,
-                model_backend=model_backend,
                 resume_suite=resume_suite,
                 parallelism=parallelism,
                 devices=devices,
